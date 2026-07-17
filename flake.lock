@@ -68,11 +68,11 @@
         "nixpkgs": "nixpkgs"
       },
       "locked": {
-        "lastModified": 1784639247,
-        "narHash": "sha256-8xl6kNkyfwM/WQRiKI4O74YxTxTgE8CG8VHFY+VXA7E=",
+        "lastModified": 1788913493,
+        "narHash": "sha256-Cipp4PAMKYwmWbGmEOdlBaIYEXG0FYp1TtzwJ5KIF6Q=",
         "ref": "refs/heads/master",
-        "rev": "b6c9e0b43eb29fa734a6ea02d7beb66a077b4b72",
-        "revCount": 25,
+        "rev": "2f1f7df4899382eb5a073faa7a10250dc85a6fe8",
+        "revCount": 27,
         "type": "git",
         "url": "ssh://git@gitlab.ocamlpro.com:30022/pierre.villemot/superbol-overlay.git"
       },
