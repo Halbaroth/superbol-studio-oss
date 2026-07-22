@@ -105,13 +105,6 @@ let isNumeric s =
   String.for_all (fun c -> c >= '0' && c <= '9') s
 
 (* Returns the same list where the first element may or may
-   not have been removed, depending on the given predicate *)
-let filterHd f l =
-  match l with
-  | e :: l when not (f e) -> l
-  | l -> l
-
-(* Returns the same list where the first element may or may
    not have been modified by the given function *)
 let mapHd f l =
   match l with
