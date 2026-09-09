@@ -5,7 +5,7 @@ version:0.9.0
 
 # hash of toml configuration files
 # used for generation of all files
-895dda8f8e47c453b04473c65c677198:.
+557bd2d81e6dc31f71d5279ff3848143:.
 # end context for .
 
 # begin context for .github/workflows/workflow.yml
@@ -15,12 +15,12 @@ da33ce03322570a859125f4b976aa0f2:.github/workflows/workflow.yml
 
 # begin context for .gitignore
 # file .gitignore
-6012555ec8a60d4de58c8d904276884e:.gitignore
+1d3d36a961aeb0324ca39632d1310857:.gitignore
 # end context for .gitignore
 
 # begin context for Makefile
 # file Makefile
-9f72712a2ce02f1e25af2c3931390409:Makefile
+50de962ffd93751db2d0643c44139bfa:Makefile
 # end context for Makefile
 
 # begin context for docs/README.txt
@@ -45,7 +45,7 @@ c8281f46ba9a11d0b61bc8ef67eaa357:docs/style.css
 
 # begin context for drom.toml
 # file drom.toml
-4789fc454f8eb281f79bc4e147ae45ec:drom.toml
+34c75f63acde27f88a52490cf5e73505:drom.toml
 # end context for drom.toml
 
 # begin context for dune
@@ -55,7 +55,7 @@ c8281f46ba9a11d0b61bc8ef67eaa357:docs/style.css
 
 # begin context for dune-project
 # file dune-project
-0a55e3399c177530a4a75668a8cb6f25:dune-project
+867862776b92eda60f31366abf61cc60:dune-project
 # end context for dune-project
 
 # begin context for opam/autofonce.opam
@@ -209,6 +209,11 @@ c6e17cecab67144be4c64725e7feddab:opam/ezr_toml.opam
 964478be6bea34f76f89a1e786449320:opam/interop-js-stubs.opam
 # end context for opam/interop-js-stubs.opam
 
+# begin context for opam/mi2-lwt.opam
+# file opam/mi2-lwt.opam
+ff77d4d96113f283256b98bc40cd824c:opam/mi2-lwt.opam
+# end context for opam/mi2-lwt.opam
+
 # begin context for opam/node-js-stubs.opam
 # file opam/node-js-stubs.opam
 017b6fa6428cb2f90bb78ed9e7fe9f2a:opam/node-js-stubs.opam
@@ -239,6 +244,11 @@ f8b3df18b351e3f5b74932b5341fcb1a:opam/sql_ast.opam
 757074847ce9859ae96f0922db617240:opam/sql_preproc.opam
 # end context for opam/sql_preproc.opam
 
+# begin context for opam/superbol-dap-server.opam
+# file opam/superbol-dap-server.opam
+9b07e8427943dfa692f4c48c73328b9f:opam/superbol-dap-server.opam
+# end context for opam/superbol-dap-server.opam
+
 # begin context for opam/superbol-debugger.opam
 # file opam/superbol-debugger.opam
 d2d2a251cdf3f4ef3edd41b0cda2612d:opam/superbol-debugger.opam
@@ -248,6 +258,11 @@ d2d2a251cdf3f4ef3edd41b0cda2612d:opam/superbol-debugger.opam
 # file opam/superbol-free.opam
 ad108188828092cb8cb80a54f92643aa:opam/superbol-free.opam
 # end context for opam/superbol-free.opam
+
+# begin context for opam/superbol-gdb-adapter.opam
+# file opam/superbol-gdb-adapter.opam
+61c5dd2491aff30b749b10a9ae1fae54:opam/superbol-gdb-adapter.opam
+# end context for opam/superbol-gdb-adapter.opam
 
 # begin context for opam/superbol-studio-oss.opam
 # file opam/superbol-studio-oss.opam
@@ -1105,6 +1120,46 @@ a66598082ef653ebcf0ce0fd10729a0d:src/vendor/vscode-ocaml-platform/src-bindings/v
 1af92d248bdb11b98ed03eb59c6831e5:src/vendor/vscode-ocaml-platform/src-bindings/vscode_languageclient/version.mlt
 # end context for src/vendor/vscode-ocaml-platform/src-bindings/vscode_languageclient/version.mlt
 
+# begin context for src/vscode/mi2-lwt/dune
+# file src/vscode/mi2-lwt/dune
+75cc175af6289ae93408ffadc587925f:src/vscode/mi2-lwt/dune
+# end context for src/vscode/mi2-lwt/dune
+
+# begin context for src/vscode/mi2-lwt/index.mld
+# file src/vscode/mi2-lwt/index.mld
+42059e3a7e31f9be6f4d29152b15300e:src/vscode/mi2-lwt/index.mld
+# end context for src/vscode/mi2-lwt/index.mld
+
+# begin context for src/vscode/mi2-lwt/package.toml
+# file src/vscode/mi2-lwt/package.toml
+1f2bc36194d0a79eff1f645f5951e28e:src/vscode/mi2-lwt/package.toml
+# end context for src/vscode/mi2-lwt/package.toml
+
+# begin context for src/vscode/mi2-lwt/version.mlt
+# file src/vscode/mi2-lwt/version.mlt
+1af92d248bdb11b98ed03eb59c6831e5:src/vscode/mi2-lwt/version.mlt
+# end context for src/vscode/mi2-lwt/version.mlt
+
+# begin context for src/vscode/superbol-dap-server/dune
+# file src/vscode/superbol-dap-server/dune
+a531a3f6737065bbef541d7bdcc2e199:src/vscode/superbol-dap-server/dune
+# end context for src/vscode/superbol-dap-server/dune
+
+# begin context for src/vscode/superbol-dap-server/linking_flags.sh
+# file src/vscode/superbol-dap-server/linking_flags.sh
+9fdfca3cc53df639758ff04fe09d3243:src/vscode/superbol-dap-server/linking_flags.sh
+# end context for src/vscode/superbol-dap-server/linking_flags.sh
+
+# begin context for src/vscode/superbol-dap-server/package.toml
+# file src/vscode/superbol-dap-server/package.toml
+828b641b3de0843dc44514120fe1fb60:src/vscode/superbol-dap-server/package.toml
+# end context for src/vscode/superbol-dap-server/package.toml
+
+# begin context for src/vscode/superbol-dap-server/version.mlt
+# file src/vscode/superbol-dap-server/version.mlt
+1af92d248bdb11b98ed03eb59c6831e5:src/vscode/superbol-dap-server/version.mlt
+# end context for src/vscode/superbol-dap-server/version.mlt
+
 # begin context for src/vscode/superbol-debugger/dune
 # file src/vscode/superbol-debugger/dune
 4041ac3af31192f839f94e55924e7fbe:src/vscode/superbol-debugger/dune
@@ -1119,6 +1174,26 @@ e08a0356a1c89191a9baee865d4f0401:src/vscode/superbol-debugger/package.toml
 # file src/vscode/superbol-debugger/version.mlt
 1af92d248bdb11b98ed03eb59c6831e5:src/vscode/superbol-debugger/version.mlt
 # end context for src/vscode/superbol-debugger/version.mlt
+
+# begin context for src/vscode/superbol-gdb-adapter/dune
+# file src/vscode/superbol-gdb-adapter/dune
+a9d0ad92e9fb9bd6fa802736fa4e9670:src/vscode/superbol-gdb-adapter/dune
+# end context for src/vscode/superbol-gdb-adapter/dune
+
+# begin context for src/vscode/superbol-gdb-adapter/index.mld
+# file src/vscode/superbol-gdb-adapter/index.mld
+5c4c1a8999b88f0cb033832f66e85a88:src/vscode/superbol-gdb-adapter/index.mld
+# end context for src/vscode/superbol-gdb-adapter/index.mld
+
+# begin context for src/vscode/superbol-gdb-adapter/package.toml
+# file src/vscode/superbol-gdb-adapter/package.toml
+dea4931f801242acdc5d532a9f7c55ba:src/vscode/superbol-gdb-adapter/package.toml
+# end context for src/vscode/superbol-gdb-adapter/package.toml
+
+# begin context for src/vscode/superbol-gdb-adapter/version.mlt
+# file src/vscode/superbol-gdb-adapter/version.mlt
+1af92d248bdb11b98ed03eb59c6831e5:src/vscode/superbol-gdb-adapter/version.mlt
+# end context for src/vscode/superbol-gdb-adapter/version.mlt
 
 # begin context for src/vscode/superbol-vscode-lib/dune
 # file src/vscode/superbol-vscode-lib/dune

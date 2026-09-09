@@ -1,0 +1,7 @@
+{1 Library superbol-gdb-adapter}
+
+SuperBOL Studio OSS is a new platform for COBOL
+
+
+The entry point of this library is the module: {!Superbol_gdb_adapter}.
+
