@@ -239,7 +239,6 @@ and parse sm cFile =
       let sm, gacc, _lacc = Util.foldFileLines (fun (sm, gacc, lacc) line ->
           let sm, gacc, lacc =
 
-            (* debug "processing: %s" line; *)
             (* Handle includes (.c) *)
             if Util.matches reFileInclude line then
               let cFile = Util.group line 1 in
