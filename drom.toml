@@ -380,3 +380,7 @@ dir = "src/tramabol/cobol_interp"
 dir = "src/tramabol/cobol_ir"
 # edit 'src/tramabol/cobol_ir/package.toml' for package-specific options
 
+[[package]]
+dir = "src/vscode/superbol-dap-server"
+# edit 'src/vscode/superbol-dap-server/package.toml' for package-specific options
+

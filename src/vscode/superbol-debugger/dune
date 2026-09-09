@@ -4,7 +4,7 @@
   (name superbol_debugger)
   (public_name superbol-debugger)
   (wrapped true)
-  (libraries vscode-js-stubs vscode-debugprotocol vscode-debugadapter superbol-vscode-lib promise_jsoo node-js-stubs lwt lwt.unix js_of_ocaml dap.types dap.rpc_lwt str)
+  (libraries vscode-js-stubs vscode-debugprotocol vscode-debugadapter superbol-vscode-lib promise_jsoo node-js-stubs js_of_ocaml str)
   (modes byte)
   (preprocess (pps gen_js_api.ppx))
     (enabled_if (= %{context_name} "default"))
