@@ -53,7 +53,6 @@ skip = ["main.ml"]
 #   ez_file = ">=0.1 <1.3"
 #   base-unix = { libname = "unix", version = ">=base" } 
 [dependencies]
-dap = "1.1.0"
 js_of_ocaml = ">=4"
 node-js-stubs = "version"
 promise_jsoo = "0.3.1"
@@ -61,6 +60,9 @@ superbol-vscode-lib = "version"
 vscode-debugadapter = "version"
 vscode-debugprotocol = "version"
 vscode-js-stubs = "version"
+[dependencies.dap]
+libname = "dap.types"
+version = ">=1.1.0"
 
 # package tools dependencies
 [tools]
