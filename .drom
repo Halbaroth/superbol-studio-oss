@@ -5,7 +5,7 @@ version:0.9.0
 
 # hash of toml configuration files
 # used for generation of all files
-560b91345104ab1ac69fdb1f09c2acdc:.
+1c9f7c2f3287b34edbe932c4c81ad897:.
 # end context for .
 
 # begin context for .github/workflows/workflow.yml
@@ -241,7 +241,7 @@ f8b3df18b351e3f5b74932b5341fcb1a:opam/sql_ast.opam
 
 # begin context for opam/superbol-debugger.opam
 # file opam/superbol-debugger.opam
-99d6195daf3e693f2fd0010fe692f7b9:opam/superbol-debugger.opam
+12ebf0426098f1112e8f45667d53087f:opam/superbol-debugger.opam
 # end context for opam/superbol-debugger.opam
 
 # begin context for opam/superbol-free.opam
@@ -1107,12 +1107,12 @@ a66598082ef653ebcf0ce0fd10729a0d:src/vendor/vscode-ocaml-platform/src-bindings/v
 
 # begin context for src/vscode/superbol-debugger/dune
 # file src/vscode/superbol-debugger/dune
-14212c88257b562ef6260aebce4502b2:src/vscode/superbol-debugger/dune
+7c02a06da8c58c51f5f6aa68eb9fb80f:src/vscode/superbol-debugger/dune
 # end context for src/vscode/superbol-debugger/dune
 
 # begin context for src/vscode/superbol-debugger/package.toml
 # file src/vscode/superbol-debugger/package.toml
-5ae9c61230829afe502858bd28b4dd84:src/vscode/superbol-debugger/package.toml
+878ac3293c19e2e7074e3331a406d767:src/vscode/superbol-debugger/package.toml
 # end context for src/vscode/superbol-debugger/package.toml
 
 # begin context for src/vscode/superbol-debugger/version.mlt

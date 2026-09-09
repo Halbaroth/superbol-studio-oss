@@ -61,8 +61,11 @@ vscode-debugadapter = "version"
 vscode-debugprotocol = "version"
 vscode-js-stubs = "version"
 [dependencies.dap]
-libname = "dap.types"
+libname = "dap.types dap.rpc_lwt"
 version = ">=1.1.0"
+[dependencies.lwt]
+libname = "lwt lwt.unix"
+version = ">=5 <5.9"
 
 # package tools dependencies
 [tools]

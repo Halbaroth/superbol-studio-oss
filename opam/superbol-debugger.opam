@@ -55,6 +55,7 @@ depends: [
   "superbol-vscode-lib" {= version}
   "promise_jsoo" {>= "0.3.1" & < "1.0.0"}
   "node-js-stubs" {= version}
+  "lwt" {>= "5" & < "5.9"}
   "js_of_ocaml" {>= "4"}
   "dap" {>= "1.1.0"}
   "js_of_ocaml-ppx" {>= "4"}
