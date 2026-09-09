@@ -58,7 +58,7 @@ fmt = ">=0.11.0"
 libname = "dap.types dap.rpc_lwt"
 version = ">=1.1.0"
 [dependencies.logs]
-libname = "logs logs.lwt"
+libname = "logs logs.lwt logs.fmt"
 [dependencies.lwt]
 libname = "lwt lwt.unix"
 version = ">=5 <5.9"

@@ -5,7 +5,7 @@ version:0.9.0
 
 # hash of toml configuration files
 # used for generation of all files
-dec70489ae88be4ae166bd2da26514dd:.
+168070e109e9693c390fbf9fa56d678f:.
 # end context for .
 
 # begin context for .github/workflows/workflow.yml
@@ -1112,12 +1112,12 @@ a66598082ef653ebcf0ce0fd10729a0d:src/vendor/vscode-ocaml-platform/src-bindings/v
 
 # begin context for src/vscode/superbol-dap-server/dune
 # file src/vscode/superbol-dap-server/dune
-eb25052b6f052344911e321373a3dcb5:src/vscode/superbol-dap-server/dune
+6e50bd77a649ec3f4cb495e866e78fd1:src/vscode/superbol-dap-server/dune
 # end context for src/vscode/superbol-dap-server/dune
 
 # begin context for src/vscode/superbol-dap-server/package.toml
 # file src/vscode/superbol-dap-server/package.toml
-d2df6e757bd8bb3cf5af47e10e570965:src/vscode/superbol-dap-server/package.toml
+f486486b969020e6dacdb41db93d9048:src/vscode/superbol-dap-server/package.toml
 # end context for src/vscode/superbol-dap-server/package.toml
 
 # begin context for src/vscode/superbol-dap-server/version.mlt
