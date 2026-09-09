@@ -5,7 +5,7 @@ version:0.9.0
 
 # hash of toml configuration files
 # used for generation of all files
-dd7dc0194a0e500566df2b744b47507c:.
+ab9820fb422b61b2fcb814c007d27b0b:.
 # end context for .
 
 # begin context for .github/workflows/workflow.yml
@@ -55,7 +55,7 @@ dbd28b277a904f5b6f8ee86047204daf:drom.toml
 
 # begin context for dune-project
 # file dune-project
-d92399d4c83032973c52ebf7c5511cc3:dune-project
+13eb214a07a95b236777ebdefc4372fb:dune-project
 # end context for dune-project
 
 # begin context for opam/autofonce.opam
@@ -241,7 +241,7 @@ f8b3df18b351e3f5b74932b5341fcb1a:opam/sql_ast.opam
 
 # begin context for opam/superbol-dap-server.opam
 # file opam/superbol-dap-server.opam
-79908f22d4720e7cc1db2fe58327e1a7:opam/superbol-dap-server.opam
+bc5a8a55397ab2f8505631778264ef80:opam/superbol-dap-server.opam
 # end context for opam/superbol-dap-server.opam
 
 # begin context for opam/superbol-debugger.opam
@@ -1112,12 +1112,12 @@ a66598082ef653ebcf0ce0fd10729a0d:src/vendor/vscode-ocaml-platform/src-bindings/v
 
 # begin context for src/vscode/superbol-dap-server/dune
 # file src/vscode/superbol-dap-server/dune
-6f4fee45bc7c41b90e700bca41b5f7c8:src/vscode/superbol-dap-server/dune
+699384dcc06b4c66ec6a08a113aff09a:src/vscode/superbol-dap-server/dune
 # end context for src/vscode/superbol-dap-server/dune
 
 # begin context for src/vscode/superbol-dap-server/package.toml
 # file src/vscode/superbol-dap-server/package.toml
-6e0050f569a464010d0329990e881b43:src/vscode/superbol-dap-server/package.toml
+cb05b42c35df7494b045a8d053e2c143:src/vscode/superbol-dap-server/package.toml
 # end context for src/vscode/superbol-dap-server/package.toml
 
 # begin context for src/vscode/superbol-dap-server/version.mlt

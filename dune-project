@@ -1103,6 +1103,7 @@
  (depends
    (ocaml (>= 4.14.0))
    (lwt (and ( >= 5 )( < 5.9 )))
+   logs
    (dap ( >= 1.1.0 ))
    odoc
    (dune (and ( >= 3.17.0 )( < 3.19.0 )))

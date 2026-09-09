@@ -55,6 +55,8 @@ skip = ["main.ml", "linking_flags.sh"]
 [dependencies.dap]
 libname = "dap.types dap.rpc_lwt"
 version = ">=1.1.0"
+[dependencies.logs]
+libname = "logs logs.lwt"
 [dependencies.lwt]
 libname = "lwt lwt.unix"
 version = ">=5 <5.9"
