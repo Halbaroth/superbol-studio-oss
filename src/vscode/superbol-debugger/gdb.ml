@@ -109,6 +109,7 @@ module GdbDebugSession = struct
     else
       Log.setLevel Log.Level.Info
 
+  (* DONE *)
   let rec initializeRequest gdb iResponse _args =
     begin
       match InitializeResponse.body iResponse with

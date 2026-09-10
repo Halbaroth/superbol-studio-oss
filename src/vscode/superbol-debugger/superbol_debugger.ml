@@ -14,6 +14,9 @@
 
 open Vscode
 
+module Mi2 = Mi2
+module Types = Types
+
 (* TODO: could use "${defaultBuildTask}" *)
 module SuperBOLConsts = struct
   let taskType = "superbol"

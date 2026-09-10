@@ -12,18 +12,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-type t = string
-
-module GdbLaunchArguments = struct
-  type t = {
-    target : string;
-    arguments : string;
-    cwd : string;
-    useCobcrun : bool;
-    gdbTargetWrapperPath : string;
-  }
-end
-
 module Dp = Debug_protocol
 
 module Compat = struct
@@ -178,6 +166,37 @@ end = struct
 end
 
 module Handlers = struct
+  module Session = struct
+    module Mi2 = Superbol_debugger.Mi2
+    module Handles = Superbol_debugger.Types.Handles
+    module IntMap = Superbol_debugger.Types.IntMap
+    module DebuggerVariable = Superbol_debugger.Types.DebuggerVariable
+
+    type int_or_string =
+      | Int of int
+      | String of string
+
+    type var_cat =
+      | Local
+      | Global
+
+    type t = {
+      server : Debug_rpc.t;
+      miDebugger : Mi2.t;
+      showDetails : bool;
+      mutable needContinue : bool;
+      mutable started : bool;
+      mutable attached : bool;
+      mutable crashed : bool;
+      mutable quit : bool;
+      mutable variableHandles : (int_or_string * var_cat) Handles.t;
+      mutable globalVariables : DebuggerVariable.t list Promise.t IntMap.t;
+    }
+  end
+
+  let handle_configuration_done_request (arg : Dp.Configuration_done_command.Arguments.t) =
+    Lwt.return ()
+
   let handle_launch_request (arg : Dp.Launch_command.Arguments.t) =
     Lwt.return ()
 
@@ -187,7 +206,9 @@ module Handlers = struct
   let handle_restart_request (arg : Dp.Restart_command.Arguments.t) =
     Lwt.return ()
 
-  let all  = Capability_set.(empty
+  let all  = Capability_set.(
+    empty
+    |> add (module Dp.Configuration_done_command) handle_configuration_done_request
     |> add (module Dp.Launch_command) handle_launch_request
     |> add (module Dp.Attach_command) handle_attach_request
     |> add (module Dp.Restart_command) handle_restart_request
