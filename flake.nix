@@ -32,9 +32,11 @@
                 dune_3
                 ocaml
                 menhir
+                utop
                 # vendor dependencies
                 gen_js_api
                 js_of_ocaml
+                dap
               ])
               ++ (with pkgs.ocamlProPackages; [
                 drom
