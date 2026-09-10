@@ -78,8 +78,7 @@ end = struct
     let doc = "Superbol DAP server" in
     C.Cmd.make (C.Cmd.info "dap" ~doc)
     @@
-    let+ socket_path
-    in
+    let+ socket_path in
     { socket_path }
 
   let parse () = Cmdliner.Cmd.eval_value' t
@@ -152,10 +151,12 @@ end = struct
           { acc with supports_configuration_done_request = Some true }
       | "setVariable" ->
           { acc with supports_set_variable = Some true }
+      | "restart" ->
+          { acc with supports_restart_request = Some true }
       | _ -> acc
     ) s no_capabilities
     in
-    let handle_initialize_request (arg : Dp.Initialize_command.Arguments.t) =
+    let handle_initialize_request (_arg : Dp.Initialize_command.Arguments.t) =
       Lwt.return capabilities
     in
     add (module Dp.Initialize_command) handle_initialize_request s
@@ -166,52 +167,81 @@ end = struct
 end
 
 module Handlers = struct
-  module Session = struct
-    module Mi2 = Superbol_debugger.Mi2
-    module Handles = Superbol_debugger.Types.Handles
-    module IntMap = Superbol_debugger.Types.IntMap
-    module DebuggerVariable = Superbol_debugger.Types.DebuggerVariable
+  (* Mandatory *)
 
-    type int_or_string =
-      | Int of int
-      | String of string
-
-    type var_cat =
-      | Local
-      | Global
-
-    type t = {
-      server : Debug_rpc.t;
-      miDebugger : Mi2.t;
-      showDetails : bool;
-      mutable needContinue : bool;
-      mutable started : bool;
-      mutable attached : bool;
-      mutable crashed : bool;
-      mutable quit : bool;
-      mutable variableHandles : (int_or_string * var_cat) Handles.t;
-      mutable globalVariables : DebuggerVariable.t list Promise.t IntMap.t;
-    }
-  end
-
-  let handle_configuration_done_request (arg : Dp.Configuration_done_command.Arguments.t) =
+  let handle_launch (_arg : Dp.Launch_command.Arguments.t) =
     Lwt.return ()
 
-  let handle_launch_request (arg : Dp.Launch_command.Arguments.t) =
+  let handle_attach (_arg : Dp.Attach_command.Arguments.t) =
     Lwt.return ()
 
-  let handle_attach_request (arg : Dp.Attach_command.Arguments.t) =
+  let handle_disconnect (_arg : Dp.Disconnect_command.Arguments.t) =
     Lwt.return ()
 
-  let handle_restart_request (arg : Dp.Restart_command.Arguments.t) =
+  let handle_set_breakpoints (_arg : Dp.Set_breakpoints_command.Arguments.t) =
+    let dummy = Dp.Set_breakpoints_command.Result.make ~breakpoints:[] () in
+    Lwt.return dummy
+
+  let handle_threads (_arg : Dp.Threads_command.Arguments.t) =
+    let dummy = Dp.Threads_command.Result.make ~threads:[] () in
+    Lwt.return dummy
+
+  let handle_stack_trace (_arg : Dp.Stack_trace_command.Arguments.t) =
+    let dummy = Dp.Stack_trace_command.Result.make ~stack_frames:[] () in
+    Lwt.return dummy
+
+  let handle_scopes (_arg : Dp.Scopes_command.Arguments.t) =
+    let dummy = Dp.Scopes_command.Result.make ~scopes:[] () in
+    Lwt.return dummy
+
+  let handle_variables (_arg : Dp.Variables_command.Arguments.t) =
+    let dummy = Dp.Variables_command.Result.make ~variables:[] () in
+    Lwt.return dummy
+
+  let handle_continue (_arg : Dp.Continue_command.Arguments.t) =
+    let dummy = Dp.Continue_command.Result.make () in
+    Lwt.return dummy
+
+  let handle_next (_arg : Dp.Next_command.Arguments.t) =
     Lwt.return ()
 
-  let all  = Capability_set.(
+  let handle_step_in (_arg : Dp.Step_in_command.Arguments.t) =
+    Lwt.return ()
+
+  let handle_step_out (_arg : Dp.Step_out_command.Arguments.t) =
+    Lwt.return ()
+
+  (* Optionals *)
+
+  let handle_configuration_done (_arg : Dp.Configuration_done_command.Arguments.t) =
+    Lwt.return ()
+
+  let handle_restart (_arg : Dp.Restart_command.Arguments.t) =
+    Lwt.return ()
+
+  let handle_set_variable (_arg : Dp.Set_variable_command.Arguments.t) =
+    let dummy =
+      Dp.Set_variable_command.Result.make ~value:"dummy" ()
+    in
+    Lwt.return dummy
+
+  let all = Capability_set.(
     empty
-    |> add (module Dp.Configuration_done_command) handle_configuration_done_request
-    |> add (module Dp.Launch_command) handle_launch_request
-    |> add (module Dp.Attach_command) handle_attach_request
-    |> add (module Dp.Restart_command) handle_restart_request
+    |> add (module Dp.Launch_command) handle_launch
+    |> add (module Dp.Attach_command) handle_attach
+    |> add (module Dp.Disconnect_command) handle_disconnect
+    |> add (module Dp.Set_breakpoints_command) handle_set_breakpoints
+    |> add (module Dp.Threads_command) handle_threads
+    |> add (module Dp.Stack_trace_command) handle_stack_trace
+    |> add (module Dp.Scopes_command) handle_scopes
+    |> add (module Dp.Variables_command) handle_variables
+    |> add (module Dp.Continue_command) handle_continue
+    |> add (module Dp.Next_command) handle_next
+    |> add (module Dp.Step_in_command) handle_step_in
+    |> add (module Dp.Step_out_command) handle_step_out
+    |> add (module Dp.Configuration_done_command) handle_configuration_done
+    |> add (module Dp.Restart_command) handle_restart
+    |> add (module Dp.Set_variable_command) handle_set_variable
     |> seal)
 end
 
@@ -226,7 +256,7 @@ let create_socket_path () =
   let temp_dir = Compat.Filename.temp_dir "superbol-dap-server-" "" in
   temp_dir // "server.sock"
 
-let with_open_socket path k =
+let with_open_socket k =
   let fd = Unix.socket ~cloexec:true Unix.PF_UNIX Unix.SOCK_STREAM 0 in
   let finally () = try Unix.close fd with _ -> () in
   Fun.protect ~finally @@ fun () -> k @@ Lwt_unix.of_unix_file_descr fd
@@ -256,7 +286,8 @@ let () =
       | Some s -> s
       | None -> create_socket_path ()
     in
-    with_open_socket socket_path @@ fun fd ->
+    (* TODO: with_open_socket is useless? *)
+    with_open_socket @@ fun fd ->
     let sockaddr = Unix.ADDR_UNIX socket_path in
     let forever, _ = Lwt.wait () in
     Lwt_main.run @@
