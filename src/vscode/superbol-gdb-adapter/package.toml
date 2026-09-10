@@ -1,7 +1,7 @@
 
 # name of package
-name = "superbol-dap-server"
-skeleton = "program"
+name = "superbol-gdb-adapter"
+skeleton = "library"
 
 # version if different from project version
 # version = "0.1.0"
@@ -13,7 +13,7 @@ skeleton = "program"
 # description = ...
 
 # kind is either "library", "program" or "virtual"
-kind = "program"
+kind = "library"
 
 # authors if different from project authors
 # authors = [ "Me <me@metoo.org>" ]
@@ -23,7 +23,7 @@ gen-version = "version.ml"
 
 # supported file generators are "ocamllex", "ocamlyacc" and "menhir" 
 # default is [ "ocamllex", "ocamlyacc" ] 
-# generators = [ "ocamllex", "menhir" ]
+generators = ["menhir", "ocamllex"]
 
 # menhir options for the package
 #Example:
@@ -53,17 +53,7 @@ skip = ["main.ml"]
 #   ez_file = ">=0.1 <1.3"
 #   base-unix = { libname = "unix", version = ">=base" } 
 [dependencies]
-cmdliner = ">=2.1.1"
-fmt = ">=0.11.0"
-superbol-gdb-adapter = "version"
-[dependencies.dap]
-libname = "dap.types dap.rpc_lwt"
-version = ">=1.1.0"
-[dependencies.logs]
-libname = "logs logs.lwt logs.fmt"
-[dependencies.lwt]
-libname = "lwt lwt.unix"
-version = ">=5 <5.9"
+# ...
 
 # package tools dependencies
 [tools]

@@ -1,4 +1,3 @@
-/src/vscode/superbol-debugger/gdb-target-wrapper
 /superbol-studio-oss
 /superbol-vscode-oss
 /interop-js-stubs
@@ -9,11 +8,11 @@
 /vscode-debugadapter
 /vscode-debugprotocol
 /superbol-free
-/superbol-dap-server
 /autofonce
 /h2mlstubs
 /tramabol
 /ezlibcob
+/superbol-dap-server
 *~
 _build
 .merlin

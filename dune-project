@@ -1102,12 +1102,28 @@
 
  (depends
    (ocaml (>= 4.14.0))
-   (superbol-debugger (= :version))
+   (superbol-gdb-adapter (= :version))
    (lwt (and ( >= 5 )( < 5.9 )))
    logs
    (fmt ( >= 0.11.0 ))
    (dap ( >= 1.1.0 ))
    (cmdliner ( >= 2.1.1 ))
+   odoc
+   (dune (and ( >= 3.17.0 )( < 3.19.0 )))
+  )
+ )
+
+(package
+ (name superbol-gdb-adapter)
+ (synopsis "SuperBOL Studio OSS Project")
+ (description "SuperBOL Studio OSS is a new platform for COBOL")
+ 
+  (sites
+    
+  )
+
+ (depends
+   (ocaml (>= 4.14.0))
    odoc
    (dune (and ( >= 3.17.0 )( < 3.19.0 )))
   )
