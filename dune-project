@@ -1102,11 +1102,12 @@
 
  (depends
    (ocaml (>= 4.14.0))
+   (superbol-debugger (= :version))
    (lwt (and ( >= 5 )( < 5.9 )))
    logs
    (fmt ( >= 0.11.0 ))
    (dap ( >= 1.1.0 ))
-   (cmdliner ( < 2 ))
+   (cmdliner ( >= 2.1.1 ))
    odoc
    (dune (and ( >= 3.17.0 )( < 3.19.0 )))
   )

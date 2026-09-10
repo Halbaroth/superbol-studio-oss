@@ -4,7 +4,7 @@
   (public_name superbol-dap-server)
   (package superbol-dap-server)
   ; use field 'dune-libraries' to add libraries without opam deps
-  (libraries lwt lwt.unix logs logs.lwt logs.fmt fmt dap.types dap.rpc_lwt cmdliner )
+  (libraries superbol-debugger lwt lwt.unix logs logs.lwt logs.fmt fmt dap.types dap.rpc_lwt cmdliner )
   (flags (:standard))
   ; use field 'dune-stanzas' to add more stanzas here
   
