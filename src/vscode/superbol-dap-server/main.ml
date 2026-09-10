@@ -1,3 +1,17 @@
+(**************************************************************************)
+(*                                                                        *)
+(*                        SuperBOL OSS Studio                             *)
+(*                                                                        *)
+(*                                                                        *)
+(*  Copyright (c) 2026 OCamlPro SAS                                       *)
+(*                                                                        *)
+(*  All rights reserved.                                                  *)
+(*  This source code is licensed under the MIT license found in the       *)
+(*  LICENSE.md file in the root directory of this source tree.            *)
+(*                                                                        *)
+(*                                                                        *)
+(**************************************************************************)
+
 type t = string
 
 module GdbLaunchArguments = struct
@@ -107,67 +121,89 @@ let lwt_reporter () =
   in
   { Logs.report = report }
 
-let (//) = Filename.concat
+module Capability_set : sig
+  type ('a, 'r) handler = 'a -> 'r Lwt.t
 
-let capabilities = Dp.Capabilities.{
-  supports_configuration_done_request = None;
-  supports_function_breakpoints = None;
-  supports_conditional_breakpoints = None;
-  supports_hit_conditional_breakpoints = None;
-  supports_evaluate_for_hovers = None;
-  exception_breakpoint_filters = None;
-  supports_step_back = None;
-  supports_set_variable = None;
-  supports_restart_frame = None;
-  supports_goto_targets_request = None;
-  supports_step_in_targets_request = None;
-  supports_completions_request = None;
-  completion_trigger_characters = None;
-  supports_modules_request = None;
-  additional_module_columns = None;
-  supported_checksum_algorithms = None;
-  supports_restart_request = None;
-  supports_exception_options = None;
-  supports_value_formatting_options = None;
-  supports_exception_info_request = None;
-  support_terminate_debuggee = None;
-  support_suspend_debuggee = None;
-  supports_delayed_stack_trace_loading = None;
-  supports_loaded_sources_request = None;
-  supports_log_points = None;
-  supports_terminate_threads_request = None;
-  supports_set_expression = None;
-  supports_terminate_request = None;
-  supports_data_breakpoints = None;
-  supports_read_memory_request = None;
-  supports_write_memory_request = None;
-  supports_disassemble_request = None;
-  supports_cancel_request = None;
-  supports_breakpoint_locations_request = None;
-  supports_clipboard_context = None;
-  supports_stepping_granularity = None;
-  supports_instruction_breakpoints = None;
-  supports_exception_filter_options = None;
-  supports_single_thread_execution_requests = None;
-  supports_data_breakpoint_bytes = None;
-  breakpoint_modes = None;
-  supports_ansistyling = None;
-}
+  type ('a, 'r) command =
+    (module Dp.COMMAND with type Arguments.t = 'a and type Result.t = 'r)
 
-let handle_initialize (arg : Dp.Initialize_command.Arguments.t) =
-  Logs.debug (fun k -> k "capabilities sending...");
-  Lwt.return capabilities
+  type unseal_t
+  type t
+
+  val empty : unseal_t
+  val add : ('a, 'r) command -> ('a, 'r) handler -> unseal_t -> unseal_t
+  val seal : unseal_t -> t
+  val set_commands : Debug_rpc.t -> t -> unit
+end = struct
+  type ('a, 'r) handler = 'a -> 'r Lwt.t
+
+  type ('a, 'r) command =
+    (module Dp.COMMAND with type Arguments.t = 'a and type Result.t = 'r)
+
+  type any_cap = Cap : ('a, 'r) command * ('a, 'r) handler -> any_cap
+
+  module M = Map.Make (String)
+
+  type unseal_t = any_cap M.t
+  type t = unseal_t
+
+  let empty = M.empty
+
+  let add (type a r)
+    ((module Command : Dp.COMMAND
+      with type Arguments.t = a and type Result.t = r) as c) (h : (a, r) handler) s =
+    M.add Command.type_ (Cap (c, h)) s
+
+  let seal s =
+    let no_capabilities = Dp.Capabilities.make () in
+    let capabilities =
+    M.fold (fun type_ _ (acc : Dp.Capabilities.t) ->
+      match type_ with
+      | "initialize" -> failwith "unexpected initialize capability in the set"
+      | "configurationDone" ->
+          { acc with supports_configuration_done_request = Some true }
+      | "setVariable" ->
+          { acc with supports_set_variable = Some true }
+      | _ -> acc
+    ) s no_capabilities
+    in
+    let handle_initialize_request (arg : Dp.Initialize_command.Arguments.t) =
+      Lwt.return capabilities
+    in
+    add (module Dp.Initialize_command) handle_initialize_request s
+
+  let set_commands server s =
+    M.iter (fun _ (Cap (m, h)) ->
+      Debug_rpc.set_command_handler server m h) s
+end
+
+module Handlers = struct
+  let handle_launch_request (arg : Dp.Launch_command.Arguments.t) =
+    Lwt.return ()
+
+  let handle_attach_request (arg : Dp.Attach_command.Arguments.t) =
+    Lwt.return ()
+
+  let handle_restart_request (arg : Dp.Restart_command.Arguments.t) =
+    Lwt.return ()
+
+  let all  = Capability_set.(empty
+    |> add (module Dp.Launch_command) handle_launch_request
+    |> add (module Dp.Attach_command) handle_attach_request
+    |> add (module Dp.Restart_command) handle_restart_request
+    |> seal)
+end
 
 let pp_sockaddr ppf sockaddr =
   match sockaddr with
   | Unix.ADDR_UNIX s -> Fmt.string ppf s
   | ADDR_INET (s, p) -> Fmt.pf ppf "%s:%d" (Unix.string_of_inet_addr s) p
 
-let create_fresh_socket () =
+let (//) = Filename.concat
+
+let create_socket_path () =
   let temp_dir = Compat.Filename.temp_dir "superbol-dap-server-" "" in
-  let path = temp_dir // "server.sock" in
-  Unix.close @@ Unix.openfile path [ O_RDWR; O_CREAT; O_EXCL ] 0o600;
-  path
+  temp_dir // "server.sock"
 
 let with_open_socket path k =
   let fd = Unix.socket ~cloexec:true Unix.PF_UNIX Unix.SOCK_STREAM 0 in
@@ -176,19 +212,19 @@ let with_open_socket path k =
 
 let run_server fd sockaddr =
   let open Lwt.Syntax in
-  Logs.info (fun k -> k "listening on %a" pp_sockaddr sockaddr);
+  Logs.info (fun k -> k "listening on: %a" pp_sockaddr sockaddr);
   let* _server =
-    Lwt_io.establish_server_with_client_address ~fd sockaddr
+    Lwt_io.establish_server_with_client_address ~fd ~no_close:true sockaddr
     @@ fun _sockaddr (in_, out) ->
       Logs.debug (fun k -> k "got a new connection");
       let server = Debug_rpc.create ~in_ ~out () in
-      Debug_rpc.set_command_handler server
-        (module Dp.Initialize_command) handle_initialize;
+      Capability_set.set_commands server Handlers.all;
       Debug_rpc.start server
   in
   Lwt.return_unit
 
 let () =
+  let open Lwt.Syntax in
   Logs.set_reporter @@ lwt_reporter ();
   Logs.set_level ~all:true (Some Logs.Debug);
   match Cmd.parse () with
@@ -197,9 +233,11 @@ let () =
     let socket_path =
       match opts.socket_path with
       | Some s -> s
-      | None -> create_fresh_socket ()
+      | None -> create_socket_path ()
     in
     with_open_socket socket_path @@ fun fd ->
     let sockaddr = Unix.ADDR_UNIX socket_path in
-    (* let forever, _ = Lwt.wait () in *)
-    Lwt_main.run (run_server fd sockaddr)
+    let forever, _ = Lwt.wait () in
+    Lwt_main.run @@
+      let* _ = run_server fd sockaddr in
+      forever
