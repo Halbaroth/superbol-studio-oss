@@ -5,7 +5,7 @@
   (public_name superbol-gdb-adapter)
   (wrapped true)
   ; use field 'dune-libraries' to add libraries without opam deps
-  (libraries  )
+  (libraries lwt lwt.unix logs logs.lwt logs.fmt )
   ; use field 'dune-flags' to set this value
   (flags (:standard))
   ; use field 'dune-stanzas' to add more stanzas here
@@ -13,6 +13,8 @@
   
   )
 
+(ocamllex mi2Lexer)
+(menhir (modules mi2Parser))
 
 (rule
     (targets version.ml)
