@@ -147,6 +147,10 @@ end = struct
     M.fold (fun type_ _ (acc : Dp.Capabilities.t) ->
       match type_ with
       | "initialize" -> failwith "unexpected initialize capability in the set"
+      | "cancel" ->
+          { acc with supports_cancel_request = Some true }
+      | "readMemory" ->
+          { acc with supports_read_memory_request = Some true }
       | "configurationDone" ->
           { acc with supports_configuration_done_request = Some true }
       | "setVariable" ->
@@ -164,6 +168,14 @@ end = struct
   let set_commands server s =
     M.iter (fun _ (Cap (m, h)) ->
       Debug_rpc.set_command_handler server m h) s
+end
+
+module Gdb = struct
+  module LaunchArguments = struct
+  end
+end
+
+module Session = struct
 end
 
 module Handlers = struct
