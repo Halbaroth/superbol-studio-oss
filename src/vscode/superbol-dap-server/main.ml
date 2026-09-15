@@ -14,6 +14,156 @@
 
 module Dp = Debug_protocol
 
+let src = Logs.Src.create ~doc:"DAP server" "DAP"
+
+module Log = (val Logs.src_log src : Logs.LOG)
+
+type ('a, 'r) command =
+  (module Dp.COMMAND with type Arguments.t = 'a and type Result.t = 'r)
+
+type ('a, 'r) handler = (* ?extra:Dp.Any.t -> *) 'a -> 'r Lwt.t
+
+module Server : sig
+  type t
+
+  val create : in_:Lwt_io.input_channel -> out:Lwt_io.output_channel -> unit -> t
+  val set_command_handler : t -> ('a, 'r) command -> ('a, 'r) handler -> unit
+  val remove_command_handler : t -> ('a, 'r) command -> unit
+  val start : t -> unit Lwt.t
+end = struct
+  type t = {
+    in_ : Lwt_io.input_channel;
+    out : Lwt_io.output_channel;
+    mutable next_seq : int;
+    handlers : (string, handler) Hashtbl.t;
+    cancel_resolvers : (int, unit Lwt.u) Hashtbl.t;
+  }
+
+  and handler = t -> Dp.Request.t -> raw:string -> unit Lwt.t
+
+  let parse_message : string Angstrom.t =
+    let open Angstrom in
+    let eol = string "\r\n" in
+    let colon = string ": " in
+    let is_colon = function ':' -> true | _ -> false in
+    let is_eol = function '\r' -> true | _ -> false in
+    let header_field =
+      lift2
+        (fun key value -> key, value)
+        (take_till is_colon <* colon)
+        (take_till is_eol <* eol)
+    in
+    (many1 header_field <* eol) >>= fun headers ->
+      (* FIXME: handle wrong length here. *)
+      let content_length =
+        int_of_string (List.assoc "Content-Length" headers)
+      in
+      take content_length
+
+  let create ~in_ ~out () =
+    let srv = {
+      in_;
+      out;
+      next_seq = 0;
+      handlers = Hashtbl.create 17;
+      cancel_resolvers = Hashtbl.create 17;
+    }
+    in
+    srv
+
+  let next_seq srv =
+    let seq = srv.next_seq in
+    srv.next_seq <- srv.next_seq + 1;
+    seq
+
+  let dispatch_request (srv : t) req raw =
+    match Hashtbl.find srv.handlers req.Dp.Request.command with
+    | exception Not_found ->
+        Log.warn (fun k -> k "Cannot find handler");
+        Lwt.return_unit
+    | handler ->
+        let (promise, resolver) = Lwt.wait () in
+        Hashtbl.replace srv.cancel_resolvers req.Dp.Request.seq resolver;
+        let finalizer () =
+          Hashtbl.remove srv.cancel_resolvers req.Dp.Request.seq;
+          Lwt.return_unit
+        in
+        Lwt.finalize
+          (fun () ->
+            Lwt.pick [
+              handler srv req ~raw;
+              promise
+            ])
+          finalizer
+
+  let remove_command_handler (type a r) srv
+    (module Command : Dp.COMMAND with type Arguments.t = a and type Result.t = r) =
+    (* FIXME: Is it correct the remove a command without cancelling all the
+       action associated with? *)
+    Hashtbl.remove srv.handlers Command.type_
+
+  let send_message srv json =
+    let open Lwt.Syntax in
+    let raw = Yojson.Safe.to_string json in
+    let* () = Lwt_io.write srv.out "Content-Length: " in
+    let* () = Lwt_io.write srv.out @@ string_of_int @@ String.length raw in
+    let* () = Lwt_io.write srv.out "\r\n\r\n" in
+    let* () = Lwt_io.write srv.out raw in
+    let* () = Lwt_io.flush srv.out in
+    Log.debug (fun k -> k "Message sent -- %a" Yojson.Safe.pp json);
+    Lwt.return_unit
+
+  let set_command_handler (type a r) srv
+    (module Command : Dp.COMMAND with type Arguments.t = a and type Result.t = r)
+    h =
+    let open Lwt.Syntax in
+    let handler srv (req : Dp.Request.t) ~raw:_ =
+      (* FIXME: handle exception *)
+      let args = Command.Arguments.of_yojson req.arguments |> Result.get_ok in
+      let* r = h args in
+      let body = Command.Result.to_yojson r in
+      let res =
+        Dp.Response.make
+          ~seq:(next_seq srv)
+          ~type_:Dp.Response.Type.Response
+          ~request_seq:req.seq
+          ~success:true
+          ~command:Command.type_
+          ~body
+          ()
+      in
+      send_message srv @@ Dp.Response.to_yojson res
+    in
+    Hashtbl.replace srv.handlers Command.type_ handler
+
+  let dispatch srv raw =
+    match Yojson.Safe.from_string raw with
+    | exception Yojson.Json_error e -> (
+        Log.err (fun k -> k "Received ill-formatted request: %s" e);
+        Log.debug (fun k -> k "Raw message: %s" raw);
+        Lwt.return_unit)
+    | json -> (
+        Log.debug (fun k -> k "Received message: %a" Yojson.Safe.pp json);
+        match Dp.Protocol_message.of_yojson json |> Result.get_ok with
+        | { type_ = Dp.Protocol_message.Type.Event; _ }
+        | { type_ = Dp.Protocol_message.Type.Response; _ } ->
+            failwith "not implemented"
+        | { type_ = Dp.Protocol_message.Type.Request; _ } ->
+            dispatch_request srv (Dp.Request.of_yojson json |> Result.get_ok) raw
+        | _ ->
+            failwith "unsupported message type")
+
+  let start srv =
+    let open Lwt.Syntax in
+    try
+      let* (_ : _ * _ result) =
+        Angstrom_lwt_unix.parse_many parse_message (dispatch srv) srv.in_
+      in
+      Lwt.return_unit
+    with Lwt_io.Channel_closed _ ->
+      Lwt.return_unit
+end
+
 module Compat = struct
   module Filename : sig
     val temp_dir : ?temp_dir:string -> ?perms:int -> string -> string -> string
@@ -84,29 +234,73 @@ end = struct
   let parse () = Cmdliner.Cmd.eval_value' t
 end
 
-let lwt_reporter () =
-  let buf_fmt ~like =
-    let b = Buffer.create 512 in
-    Fmt.with_buffer ~like b,
-    fun () -> let m = Buffer.contents b in Buffer.reset b; m
-  in
-  let app, app_flush = buf_fmt ~like:Fmt.stdout in
-  let dst, dst_flush = buf_fmt ~like:Fmt.stderr in
-  let reporter = Logs_fmt.reporter ~app ~dst () in
-  let report src level ~over k msgf =
-    let k () =
-      let write () =
-        match level with
-        | Logs.App -> Lwt_io.write Lwt_io.stdout (app_flush ())
-        | _ -> Lwt_io.write Lwt_io.stderr (dst_flush ())
-      in
-      let unblock () = over (); Lwt.return_unit in
-      Lwt.finalize write unblock |> Lwt.ignore_result;
-      k ()
+module Reporter : sig
+  val lwt_reporter : unit -> Logs.reporter
+end = struct
+  let app_style = `Cyan
+  let err_style = `Red
+  let warn_style = `Yellow
+  let info_style = `Blue
+  let debug_style = `Green
+
+  let pp_brackets pp_v ppf v = Fmt.char ppf '['; pp_v ppf v; Fmt.char ppf ']'
+
+  let pp_h ppf style h =
+    Fmt.char ppf '[';
+    Fmt.(styled style string) ppf h;
+    Fmt.char ppf ']';
+    Fmt.char ppf ' '
+
+  let pp_header ppf (l, h) =
+    match l with
+    | Logs.App ->
+        begin match h with
+        | None -> ()
+        | Some h ->
+            pp_brackets Fmt.(styled app_style string) ppf h; Fmt.char ppf ' '
+        end
+    | Logs.Error ->
+        pp_h ppf err_style (match h with None -> "ERROR" | Some h -> h)
+    | Logs.Warning ->
+        pp_h ppf warn_style (match h with None -> "WARNING" | Some h -> h)
+    | Logs.Info ->
+        pp_h ppf info_style (match h with None -> "INFO" | Some h -> h)
+    | Logs.Debug ->
+        pp_h ppf debug_style (match h with None -> "DEBUG" | Some h -> h)
+
+  let add_colors fd oc =
+    if Unix.isatty fd then
+      Fmt_tty.setup ~style_renderer:`Ansi_tty oc
+    else
+      Format.formatter_of_out_channel oc
+
+  let lwt_reporter () =
+    let stdout = add_colors Unix.stdout stdout in
+    let stderr = add_colors Unix.stderr stderr in
+    let buf_fmt ~like =
+      let b = Buffer.create 512 in
+      let ppf = Fmt.with_buffer ~like b in
+      ( ppf,
+        fun () -> let m = Buffer.contents b in Buffer.reset b; m )
     in
-    reporter.Logs.report src level ~over:(fun () -> ()) k msgf;
-  in
-  { Logs.report = report }
+    let app, app_flush = buf_fmt ~like:stdout in
+    let dst, dst_flush = buf_fmt ~like:stderr in
+    let reporter = Logs_fmt.reporter ~pp_header ~app ~dst () in
+    let report src level ~over k msgf =
+      let k () =
+        let write () =
+          match level with
+          | Logs.App -> Lwt_io.write Lwt_io.stdout (app_flush ())
+          | _ -> Lwt_io.write Lwt_io.stderr (dst_flush ())
+        in
+        let unblock () = over (); Lwt.return_unit in
+        Lwt.finalize write unblock |> Lwt.ignore_result;
+        k ()
+      in
+      reporter.Logs.report src level ~over:(fun () -> ()) k msgf;
+    in
+    { Logs.report = report }
+end
 
 module Capability_set : sig
   type ('a, 'r) handler = 'a -> 'r Lwt.t
@@ -120,7 +314,7 @@ module Capability_set : sig
   val empty : unseal_t
   val add : ('a, 'r) command -> ('a, 'r) handler -> unseal_t -> unseal_t
   val seal : unseal_t -> t
-  val set_commands : Debug_rpc.t -> t -> unit
+  val set_commands : Server.t -> t -> unit
 end = struct
   type ('a, 'r) handler = 'a -> 'r Lwt.t
 
@@ -167,7 +361,7 @@ end = struct
 
   let set_commands server s =
     M.iter (fun _ (Cap (m, h)) ->
-      Debug_rpc.set_command_handler server m h) s
+      Server.set_command_handler server m h) s
 end
 
 module Gdb = struct
@@ -275,20 +469,19 @@ let with_open_socket k =
 
 let run_server fd sockaddr =
   let open Lwt.Syntax in
-  Logs.info (fun k -> k "listening on: %a" pp_sockaddr sockaddr);
+  Log.info (fun k -> k "listening on: %a" pp_sockaddr sockaddr);
   let* _server =
     Lwt_io.establish_server_with_client_address ~fd ~no_close:true sockaddr
     @@ fun _sockaddr (in_, out) ->
-      Logs.debug (fun k -> k "got a new connection");
-      let server = Debug_rpc.create ~in_ ~out () in
+      let server = Server.create ~in_ ~out () in
       Capability_set.set_commands server Handlers.all;
-      Debug_rpc.start server
+      Server.start server
   in
   Lwt.return_unit
 
 let () =
   let open Lwt.Syntax in
-  Logs.set_reporter @@ lwt_reporter ();
+  Logs.set_reporter @@ Reporter.lwt_reporter ();
   Logs.set_level ~all:true (Some Logs.Debug);
   match Cmd.parse () with
   | `Exit code -> exit code
