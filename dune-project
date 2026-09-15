@@ -1102,6 +1102,7 @@
 
  (depends
    (ocaml (>= 4.14.0))
+   (yojson ( >= 3.2 ))
    (superbol-gdb-adapter (= :version))
    (lwt (and ( >= 5 )( < 5.9 )))
    logs
