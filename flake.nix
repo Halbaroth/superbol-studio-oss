@@ -37,6 +37,7 @@
                 gen_js_api
                 js_of_ocaml
                 dap
+                ppx_fields_conv
               ])
               ++ (with pkgs.ocamlProPackages; [
                 drom

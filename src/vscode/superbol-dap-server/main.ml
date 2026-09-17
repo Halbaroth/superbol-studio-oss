@@ -12,16 +12,54 @@
 (*                                                                        *)
 (**************************************************************************)
 
+module Gdb = struct
+  module LaunchArguments = struct
+    type t = {
+      target : string;
+      arguments : string;
+      cwd : string option;
+      (* group : string list; *)
+      (* env : (string * string) list; *)
+      verbose : bool;
+      tty : bool;
+      useCobcrun : bool;
+      cobcrunPath : string;
+      targetWrapperPath : string;
+      (* sourceDirs : string list; *)
+    }
+    [@@deriving yojson, show, fields]
+
+    let is_field s = List.mem s Fields.names
+  end
+
+  module AttachArguments = struct
+    type t = {
+      pid : string option;
+      remoteDebugger : string option;
+      target : string;
+      arguments : string;
+      cwd : string option;
+      group : string list;
+      env : (string * string) list;
+      verbose : bool;
+      useCobcrun : bool;
+      cobcrunPath : string;
+      targetWrapperPath : string;
+      sourceDirs : string list;
+    }
+    [@@deriving yojson, show, fields]
+
+    let is_field s = List.mem s Fields.names
+  end
+end
+
 module Dp = struct
   include Debug_protocol
 
-  module U = struct
-    include Yojson.Safe.Util
-
-    let filter_object p json =
-      let l = List.filter (fun (name, _value) -> p name) @@ to_assoc json in
-      `Assoc l
-  end
+  let filter_object p json =
+    let open Yojson.Safe.Util in
+    let l = List.filter (fun (name, _value) -> p name) @@ to_assoc json in
+    `Assoc l
 
   module Launch_command_ex = struct
     include Launch_command
@@ -34,24 +72,21 @@ module Dp = struct
       }
 
       let of_yojson json =
-        let no_debug = U.member "noDebug" json |> U.to_bool_option in
+        let open Yojson.Safe.Util in
+        let no_debug = member "noDebug" json |> to_bool_option in
         let __restart =
-          match U.member "__restart" json with
-          | exception U.Undefined _ -> None
+          match member "__restart" json with
+          | exception Undefined _ -> None
           | v -> Some v
         in
-        let extra =
-          U.filter_object (fun s ->
-            match s with
-            | "noDebug" | "__restart" -> false
-            | _ -> true) json
-        in
+        let extra = filter_object Gdb.LaunchArguments.is_field json in
         Ok { no_debug; __restart; extra }
 
       let to_yojson { no_debug; __restart; extra } =
+        let open Yojson.Safe.Util in
         let b = Launch_command.Arguments.to_yojson { no_debug; __restart } in
         (* FIXME: [combine] doesn't handle collisions. *)
-        U.combine b extra
+        combine b extra
     end
   end
 
@@ -65,23 +100,20 @@ module Dp = struct
       }
 
       let of_yojson json =
+        let open Yojson.Safe.Util in
         let __restart =
-          match U.member "__restart" json with
-          | exception U.Undefined _ -> None
+          match member "__restart" json with
+          | exception Undefined _ -> None
           | v -> Some v
         in
-        let extra =
-          U.filter_object (fun s ->
-            match s with
-            | "noDebug" | "__restart" -> false
-            | _ -> true) json
-        in
+        let extra = filter_object Gdb.AttachArguments.is_field json in
         Ok { __restart; extra }
 
       let to_yojson { __restart; extra } =
+        let open Yojson.Safe.Util in
         let b = Attach_command.Arguments.to_yojson { __restart } in
         (* FIXME: [combine] doesn't handle collisions. *)
-        U.combine b extra
+        combine b extra
     end
   end
 end
@@ -94,159 +126,6 @@ type ('a, 'r) command =
   (module Dp.COMMAND with type Arguments.t = 'a and type Result.t = 'r)
 
 type ('a, 'r) handler = 'a -> 'r Lwt.t
-
-module Server : sig
-  type t
-
-  val create : in_:Lwt_io.input_channel -> out:Lwt_io.output_channel -> unit -> t
-  val set_command_handler : t -> ('a, 'r) command -> ('a, 'r) handler -> unit
-  val remove_command_handler : t -> ('a, 'r) command -> unit
-  val start : t -> unit Lwt.t
-end = struct
-  type t = {
-    in_ : Lwt_io.input_channel;
-    out : Lwt_io.output_channel;
-    mutable next_seq : int;
-    handlers : (string, any_handler) Hashtbl.t;
-    cancel_resolvers : (int, unit Lwt.u) Hashtbl.t;
-  }
-
-  and any_handler = t -> Dp.Request.t -> raw:string -> unit Lwt.t
-
-  let parse_message : string Angstrom.t =
-    let open Angstrom in
-    let eol = string "\r\n" in
-    let colon = string ": " in
-    let is_colon = function ':' -> true | _ -> false in
-    let is_eol = function '\r' -> true | _ -> false in
-    let header_field =
-      lift2
-        (fun key value -> key, value)
-        (take_till is_colon <* colon)
-        (take_till is_eol <* eol)
-    in
-    (many1 header_field <* eol) >>= fun headers ->
-      (* FIXME: handle wrong length here. *)
-      let content_length =
-        int_of_string (List.assoc "Content-Length" headers)
-      in
-      take content_length
-
-  let create ~in_ ~out () =
-    let srv = {
-      in_;
-      out;
-      next_seq = 0;
-      handlers = Hashtbl.create 17;
-      cancel_resolvers = Hashtbl.create 17;
-    }
-    in
-    srv
-
-  let next_seq srv =
-    let seq = srv.next_seq in
-    srv.next_seq <- srv.next_seq + 1;
-    seq
-
-  let dispatch_request (srv : t) req raw =
-    match Hashtbl.find srv.handlers req.Dp.Request.command with
-    | exception Not_found ->
-        Log.warn (fun k -> k "Cannot find handler");
-        Lwt.return_unit
-    | handler ->
-        let (promise, resolver) = Lwt.wait () in
-        Hashtbl.replace srv.cancel_resolvers req.Dp.Request.seq resolver;
-        let finalizer () =
-          Hashtbl.remove srv.cancel_resolvers req.Dp.Request.seq;
-          Lwt.return_unit
-        in
-        Lwt.finalize
-          (fun () ->
-            Lwt.pick [
-              handler srv req ~raw;
-              promise
-            ])
-          finalizer
-
-  let remove_command_handler (type a r) srv
-    (module Command : Dp.COMMAND with type Arguments.t = a and type Result.t = r) =
-    (* FIXME: Is it correct the remove a command without cancelling all the
-       action associated with? *)
-    Hashtbl.remove srv.handlers Command.type_
-
-  let send_message srv json =
-    let open Lwt.Syntax in
-    let raw = Yojson.Safe.to_string json in
-    let* () = Lwt_io.write srv.out "Content-Length: " in
-    let* () = Lwt_io.write srv.out @@ string_of_int @@ String.length raw in
-    let* () = Lwt_io.write srv.out "\r\n\r\n" in
-    let* () = Lwt_io.write srv.out raw in
-    let* () = Lwt_io.flush srv.out in
-    Log.debug (fun k -> k "Message sent -- %a" Yojson.Safe.pp json);
-    Lwt.return_unit
-
-  let inject_extra_arguments (type a r)
-    (module Command : Dp.COMMAND with type Arguments.t = a and type Result.t = r)
-    (args : a) =
-    match args with
-    | _ -> assert false
-
-  let set_command_handler (type a r) srv
-    (module Command : Dp.COMMAND with type Arguments.t = a and type Result.t = r)
-    (h : (a, r) handler) =
-    let open Lwt.Syntax in
-    let handler srv (req : Dp.Request.t) ~raw:_ =
-      match Command.Arguments.of_yojson req.arguments with
-      | Error s ->
-          Log.debug (fun k -> k "cannot parse arguments: %s" s);
-          Lwt.return_unit
-      | Ok args ->
-          let* r = h args in
-          let body = Command.Result.to_yojson r in
-          let res =
-            Dp.Response.make
-              ~seq:(next_seq srv)
-              ~type_:Dp.Response.Type.Response
-              ~request_seq:req.seq
-              ~success:true
-              ~command:Command.type_
-              ~body
-              ()
-          in
-          send_message srv @@ Dp.Response.to_yojson res
-    in
-    Hashtbl.replace srv.handlers Command.type_ handler
-
-  let dispatch srv raw =
-    match Yojson.Safe.from_string raw with
-    | exception Yojson.Json_error e -> (
-        Log.err (fun k -> k "Received ill-formatted request: %s" e);
-        Log.debug (fun k -> k "Raw message: %s" raw);
-        Lwt.return_unit)
-    | json -> (
-        Log.debug (fun k -> k "Received message: %a" Yojson.Safe.pp json);
-        match Dp.Protocol_message.of_yojson json with
-        | Error s -> (
-            Log.err (fun k -> k "Invalid message: %s" s);
-            Lwt.return_unit)
-        | Ok { type_ = Dp.Protocol_message.Type.Event; _ }
-        | Ok { type_ = Dp.Protocol_message.Type.Response; _ } ->
-            failwith "not implemented"
-        | Ok { type_ = Dp.Protocol_message.Type.Request; _ } ->
-            dispatch_request srv (Dp.Request.of_yojson json |> Result.get_ok) raw
-        | _ ->
-            failwith "unsupported message type")
-
-  let start srv =
-    let open Lwt.Syntax in
-    try
-      let* (_ : _ * _ result) =
-        Angstrom_lwt_unix.parse_many parse_message (dispatch srv) srv.in_
-      in
-      Lwt.return_unit
-    with Lwt_io.Channel_closed _ ->
-      Lwt.return_unit
-end
 
 module Compat = struct
   module Filename : sig
@@ -393,7 +272,7 @@ module Capability_set : sig
   val empty : unseal_t
   val add : ('a, 'r) command -> ('a, 'r) handler -> unseal_t -> unseal_t
   val seal : unseal_t -> t
-  val set_commands : Server.t -> t -> unit
+  val set_commands : Debug_rpc.t -> t -> unit
 end = struct
   type any_cap = Cap : ('a, 'r) command * ('a, 'r) handler -> any_cap
 
@@ -435,12 +314,7 @@ end = struct
 
   let set_commands server s =
     M.iter (fun _ (Cap (m, h)) ->
-      Server.set_command_handler server m h) s
-end
-
-module Gdb = struct
-  module LaunchArguments = struct
-  end
+      Debug_rpc.set_command_handler server m h) s
 end
 
 module Session = struct
@@ -451,11 +325,23 @@ module Handlers = struct
 
   let handle_launch_ex (arg : Dp.Launch_command_ex.Arguments.t) =
     Log.debug (fun k -> k "Extra arguments: %a" Yojson.Safe.pp arg.extra);
-    Lwt.return ()
+    match Gdb.LaunchArguments.of_yojson arg.extra with
+    | Ok gdb_arguments ->
+      Log.debug (fun k -> k "Gdb arguments: %a" Gdb.LaunchArguments.pp gdb_arguments);
+      Lwt.return ()
+    | Error s ->
+      Log.err (fun k -> k "Cannot read gdb arguments: %s" s);
+      Lwt.return ()
 
   let handle_attach_ex (arg : Dp.Attach_command_ex.Arguments.t) =
     Log.debug (fun k -> k "Extra arguments: %a" Yojson.Safe.pp arg.extra);
-    Lwt.return ()
+    match Gdb.AttachArguments.of_yojson arg.extra with
+    | Ok gdb_arguments ->
+      Log.debug (fun k -> k "Gdb arguments: %a" Gdb.AttachArguments.pp gdb_arguments);
+      Lwt.return ()
+    | Error s ->
+      Log.err (fun k -> k "Cannot read gdb arguments: %s" s);
+      Lwt.return ()
 
   let handle_disconnect (_arg : Dp.Disconnect_command.Arguments.t) =
     Lwt.return ()
@@ -549,9 +435,9 @@ let run_server fd sockaddr =
   let* _server =
     Lwt_io.establish_server_with_client_address ~fd ~no_close:true sockaddr
     @@ fun _sockaddr (in_, out) ->
-      let server = Server.create ~in_ ~out () in
+      let server = Debug_rpc.create ~in_ ~out () in
       Capability_set.set_commands server Handlers.all;
-      Server.start server
+      Debug_rpc.start server
   in
   Lwt.return_unit
 
