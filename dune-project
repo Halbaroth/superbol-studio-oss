@@ -1110,6 +1110,8 @@
    (dap ( >= 1.1.0 ))
    (cmdliner ( >= 2.1.1 ))
    (angstrom ( >= 0.16.1 ))
+   ppx_yojson_conv
+   ppx_deriving
    odoc
    (dune (and ( >= 3.17.0 )( < 3.19.0 )))
   )

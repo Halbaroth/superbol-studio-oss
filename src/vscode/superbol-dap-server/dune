@@ -7,7 +7,7 @@
   (libraries yojson superbol-gdb-adapter lwt lwt.unix logs logs.lwt logs.fmt fmt fmt.tty dap.types dap.rpc_lwt cmdliner angstrom )
   (flags (:standard))
   ; use field 'dune-stanzas' to add more stanzas here
-  
+  (preprocess (pps ppx_deriving_yojson ppx_deriving.show ppx_fields_conv))
   
   )
 

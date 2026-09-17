@@ -43,7 +43,7 @@ gen-version = "version.ml"
 
 # preprocessing options
 #  preprocess = "per-module (((action (run ./toto.sh %{input-file})) mod))" 
-# preprocess = "pps ppx_deriving_encoding"
+preprocess = "pps ppx_deriving_yojson ppx_deriving.show ppx_fields_conv"
 
 # files to skip while updating at package level
 skip = ["main.ml"]
@@ -71,7 +71,9 @@ version = ">=5 <5.9"
 
 # package tools dependencies
 [tools]
-# ...
+ppx_deriving = ""
+[tools.ppx_yojson_conv]
+libname = "ppx_deriving_yojson.runtime"
 
 # package fields (depends on package skeleton)
 #Examples:
