@@ -12,7 +12,79 @@
 (*                                                                        *)
 (**************************************************************************)
 
-module Dp = Debug_protocol
+module Dp = struct
+  include Debug_protocol
+
+  module U = struct
+    include Yojson.Safe.Util
+
+    let filter_object p json =
+      let l = List.filter (fun (name, _value) -> p name) @@ to_assoc json in
+      `Assoc l
+  end
+
+  module Launch_command_ex = struct
+    include Launch_command
+
+    module Arguments = struct
+      type t = {
+        no_debug : bool option;
+        __restart : Any.t option;
+        extra : Any.t;
+      }
+
+      let of_yojson json =
+        let no_debug = U.member "noDebug" json |> U.to_bool_option in
+        let __restart =
+          match U.member "__restart" json with
+          | exception U.Undefined _ -> None
+          | v -> Some v
+        in
+        let extra =
+          U.filter_object (fun s ->
+            match s with
+            | "noDebug" | "__restart" -> false
+            | _ -> true) json
+        in
+        Ok { no_debug; __restart; extra }
+
+      let to_yojson { no_debug; __restart; extra } =
+        let b = Launch_command.Arguments.to_yojson { no_debug; __restart } in
+        (* FIXME: [combine] doesn't handle collisions. *)
+        U.combine b extra
+    end
+  end
+
+  module Attach_command_ex = struct
+    include Attach_command
+
+    module Arguments = struct
+      type t = {
+        __restart : Any.t option;
+        extra : Any.t;
+      }
+
+      let of_yojson json =
+        let __restart =
+          match U.member "__restart" json with
+          | exception U.Undefined _ -> None
+          | v -> Some v
+        in
+        let extra =
+          U.filter_object (fun s ->
+            match s with
+            | "noDebug" | "__restart" -> false
+            | _ -> true) json
+        in
+        Ok { __restart; extra }
+
+      let to_yojson { __restart; extra } =
+        let b = Attach_command.Arguments.to_yojson { __restart } in
+        (* FIXME: [combine] doesn't handle collisions. *)
+        U.combine b extra
+    end
+  end
+end
 
 let src = Logs.Src.create ~doc:"DAP server" "DAP"
 
@@ -21,7 +93,7 @@ module Log = (val Logs.src_log src : Logs.LOG)
 type ('a, 'r) command =
   (module Dp.COMMAND with type Arguments.t = 'a and type Result.t = 'r)
 
-type ('a, 'r) handler = (* ?extra:Dp.Any.t -> *) 'a -> 'r Lwt.t
+type ('a, 'r) handler = 'a -> 'r Lwt.t
 
 module Server : sig
   type t
@@ -35,11 +107,11 @@ end = struct
     in_ : Lwt_io.input_channel;
     out : Lwt_io.output_channel;
     mutable next_seq : int;
-    handlers : (string, handler) Hashtbl.t;
+    handlers : (string, any_handler) Hashtbl.t;
     cancel_resolvers : (int, unit Lwt.u) Hashtbl.t;
   }
 
-  and handler = t -> Dp.Request.t -> raw:string -> unit Lwt.t
+  and any_handler = t -> Dp.Request.t -> raw:string -> unit Lwt.t
 
   let parse_message : string Angstrom.t =
     let open Angstrom in
@@ -113,26 +185,35 @@ end = struct
     Log.debug (fun k -> k "Message sent -- %a" Yojson.Safe.pp json);
     Lwt.return_unit
 
+  let inject_extra_arguments (type a r)
+    (module Command : Dp.COMMAND with type Arguments.t = a and type Result.t = r)
+    (args : a) =
+    match args with
+    | _ -> assert false
+
   let set_command_handler (type a r) srv
     (module Command : Dp.COMMAND with type Arguments.t = a and type Result.t = r)
-    h =
+    (h : (a, r) handler) =
     let open Lwt.Syntax in
     let handler srv (req : Dp.Request.t) ~raw:_ =
-      (* FIXME: handle exception *)
-      let args = Command.Arguments.of_yojson req.arguments |> Result.get_ok in
-      let* r = h args in
-      let body = Command.Result.to_yojson r in
-      let res =
-        Dp.Response.make
-          ~seq:(next_seq srv)
-          ~type_:Dp.Response.Type.Response
-          ~request_seq:req.seq
-          ~success:true
-          ~command:Command.type_
-          ~body
-          ()
-      in
-      send_message srv @@ Dp.Response.to_yojson res
+      match Command.Arguments.of_yojson req.arguments with
+      | Error s ->
+          Log.debug (fun k -> k "cannot parse arguments: %s" s);
+          Lwt.return_unit
+      | Ok args ->
+          let* r = h args in
+          let body = Command.Result.to_yojson r in
+          let res =
+            Dp.Response.make
+              ~seq:(next_seq srv)
+              ~type_:Dp.Response.Type.Response
+              ~request_seq:req.seq
+              ~success:true
+              ~command:Command.type_
+              ~body
+              ()
+          in
+          send_message srv @@ Dp.Response.to_yojson res
     in
     Hashtbl.replace srv.handlers Command.type_ handler
 
@@ -144,11 +225,14 @@ end = struct
         Lwt.return_unit)
     | json -> (
         Log.debug (fun k -> k "Received message: %a" Yojson.Safe.pp json);
-        match Dp.Protocol_message.of_yojson json |> Result.get_ok with
-        | { type_ = Dp.Protocol_message.Type.Event; _ }
-        | { type_ = Dp.Protocol_message.Type.Response; _ } ->
+        match Dp.Protocol_message.of_yojson json with
+        | Error s -> (
+            Log.err (fun k -> k "Invalid message: %s" s);
+            Lwt.return_unit)
+        | Ok { type_ = Dp.Protocol_message.Type.Event; _ }
+        | Ok { type_ = Dp.Protocol_message.Type.Response; _ } ->
             failwith "not implemented"
-        | { type_ = Dp.Protocol_message.Type.Request; _ } ->
+        | Ok { type_ = Dp.Protocol_message.Type.Request; _ } ->
             dispatch_request srv (Dp.Request.of_yojson json |> Result.get_ok) raw
         | _ ->
             failwith "unsupported message type")
@@ -303,11 +387,6 @@ end = struct
 end
 
 module Capability_set : sig
-  type ('a, 'r) handler = 'a -> 'r Lwt.t
-
-  type ('a, 'r) command =
-    (module Dp.COMMAND with type Arguments.t = 'a and type Result.t = 'r)
-
   type unseal_t
   type t
 
@@ -316,11 +395,6 @@ module Capability_set : sig
   val seal : unseal_t -> t
   val set_commands : Server.t -> t -> unit
 end = struct
-  type ('a, 'r) handler = 'a -> 'r Lwt.t
-
-  type ('a, 'r) command =
-    (module Dp.COMMAND with type Arguments.t = 'a and type Result.t = 'r)
-
   type any_cap = Cap : ('a, 'r) command * ('a, 'r) handler -> any_cap
 
   module M = Map.Make (String)
@@ -354,7 +428,7 @@ end = struct
       | _ -> acc
     ) s no_capabilities
     in
-    let handle_initialize_request (_arg : Dp.Initialize_command.Arguments.t) =
+    let handle_initialize_request ?extra:_ (_arg : Dp.Initialize_command.Arguments.t) =
       Lwt.return capabilities
     in
     add (module Dp.Initialize_command) handle_initialize_request s
@@ -375,10 +449,12 @@ end
 module Handlers = struct
   (* Mandatory *)
 
-  let handle_launch (_arg : Dp.Launch_command.Arguments.t) =
+  let handle_launch_ex (arg : Dp.Launch_command_ex.Arguments.t) =
+    Log.debug (fun k -> k "Extra arguments: %a" Yojson.Safe.pp arg.extra);
     Lwt.return ()
 
-  let handle_attach (_arg : Dp.Attach_command.Arguments.t) =
+  let handle_attach_ex (arg : Dp.Attach_command_ex.Arguments.t) =
+    Log.debug (fun k -> k "Extra arguments: %a" Yojson.Safe.pp arg.extra);
     Lwt.return ()
 
   let handle_disconnect (_arg : Dp.Disconnect_command.Arguments.t) =
@@ -433,8 +509,8 @@ module Handlers = struct
 
   let all = Capability_set.(
     empty
-    |> add (module Dp.Launch_command) handle_launch
-    |> add (module Dp.Attach_command) handle_attach
+    |> add (module Dp.Launch_command_ex) handle_launch_ex
+    |> add (module Dp.Attach_command_ex) handle_attach_ex
     |> add (module Dp.Disconnect_command) handle_disconnect
     |> add (module Dp.Set_breakpoints_command) handle_set_breakpoints
     |> add (module Dp.Threads_command) handle_threads
