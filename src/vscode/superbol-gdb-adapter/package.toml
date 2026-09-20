@@ -43,7 +43,7 @@ generators = ["menhir", "ocamllex"]
 
 # preprocessing options
 #  preprocess = "per-module (((action (run ./toto.sh %{input-file})) mod))" 
-# preprocess = "pps ppx_deriving_encoding"
+preprocess = "pps lwt_ppx"
 
 # files to skip while updating at package level
 skip = ["main.ml"]

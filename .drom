@@ -5,7 +5,7 @@ version:0.9.0
 
 # hash of toml configuration files
 # used for generation of all files
-9953dafee737a0b6af6db5c31dc1cc5f:.
+cd4a5564c9eda0ec521dc14b158e997e:.
 # end context for .
 
 # begin context for .github/workflows/workflow.yml
@@ -1162,7 +1162,7 @@ e08a0356a1c89191a9baee865d4f0401:src/vscode/superbol-debugger/package.toml
 
 # begin context for src/vscode/superbol-gdb-adapter/package.toml
 # file src/vscode/superbol-gdb-adapter/package.toml
-f4353ec6ea9753e0d731eca2162b46ab:src/vscode/superbol-gdb-adapter/package.toml
+454847f4a4237f6b915ca8798f32af32:src/vscode/superbol-gdb-adapter/package.toml
 # end context for src/vscode/superbol-gdb-adapter/package.toml
 
 # begin context for src/vscode/superbol-gdb-adapter/version.mlt
