@@ -18,14 +18,14 @@ module Gdb = struct
       target : string;
       arguments : string;
       cwd : string option;
-      (* group : string list; *)
-      (* env : (string * string) list; *)
-      verbose : bool;
+      group : string list [@default []];
+      env : (string * string) list [@default []];
+      verbose : bool; (* TODO: useless for a remote server? *)
       tty : bool;
       useCobcrun : bool;
       cobcrunPath : string;
       targetWrapperPath : string;
-      (* sourceDirs : string list; *)
+      sourceDirs : string list [@default []];
     }
     [@@deriving yojson, show, fields]
 
@@ -45,7 +45,7 @@ module Gdb = struct
       useCobcrun : bool;
       cobcrunPath : string;
       targetWrapperPath : string;
-      sourceDirs : string list;
+      sourceDirs : string list [@default []];
     }
     [@@deriving yojson, show, fields]
 
@@ -317,84 +317,567 @@ end = struct
       Debug_rpc.set_command_handler server m h) s
 end
 
+module Mi2 = Superbol_gdb_adapter.Mi2
+module Types = Superbol_gdb_adapter.Types
+module VariableDetail = Types.VariableDetail
+module Util = Superbol_gdb_adapter.Util
+module DebuggerVariable = Types.DebuggerVariable
+module StrMap = Types.StrMap
+
+module Handles = struct
+  module IntMap = Types.IntMap
+
+  type 'a t = {
+    mutable map : 'a IntMap.t;
+    mutable next : int;
+    start : int;
+  }
+
+  let create start =
+    { map = IntMap.empty; next = start; start }
+
+  let reset handles =
+    handles.map <- IntMap.empty;
+    handles.next <- handles.start
+
+  let set handles value =
+    let handle = handles.next in
+    handles.next <- handles.next + 1;
+    handles.map <- IntMap.add handle value handles.map;
+    handle
+
+  let get handle handles =
+    IntMap.find handle handles.map
+
+  let get_opt handle handles =
+    IntMap.find_opt handle handles.map
+end
+
+let stackHandlesStart = 1000
+let varHandlesStart = 512 * 256 + stackHandlesStart
+
 module Session = struct
+  type int_or_string =
+    | Int of int
+    | String of string
+
+  type var_cat =
+    | Local
+    | Global
+
+  type t = {
+    debugger : Mi2.t;
+    showDetails : bool;
+    mutable started : bool;
+    mutable needContinue : bool;
+    mutable attached : bool;
+    mutable variableHandles : (int_or_string * var_cat) Handles.t;
+    mutable globalVariables : Types.DebuggerVariable.t list Lwt.t Types.IntMap.t;
+  }
+
+  let create () =
+    (* let showDetails = Settings.displayVariableAttributes () in *)
+    let debugger = Mi2.create () in
+    { debugger; started = false; needContinue = false; attached = false;
+    variableHandles = Handles.create varHandlesStart;
+  globalVariables = Types.IntMap.empty;
+  showDetails = true;
+  }
 end
 
 module Handlers = struct
   (* Mandatory *)
 
-  let handle_launch_ex (arg : Dp.Launch_command_ex.Arguments.t) =
-    Log.debug (fun k -> k "Extra arguments: %a" Yojson.Safe.pp arg.extra);
-    match Gdb.LaunchArguments.of_yojson arg.extra with
-    | Ok gdb_arguments ->
-      Log.debug (fun k -> k "Gdb arguments: %a" Gdb.LaunchArguments.pp gdb_arguments);
-      Lwt.return ()
+  let gdb_path = "/nix/store/wxsng4diyqp5ndxavm7rd47q3m20irvm-user-environment/bin/gdb"
+
+  let error ~id fmt =
+    let open Dp in
+    Format.kasprintf (fun s ->
+      let msg = Message.make ~id ~format:s ~show_user:(Some true) () in
+      raise (Debug_rpc.Error_with_message msg)) fmt
+
+  let handle_launch_ex server session (args : Dp.Launch_command_ex.Arguments.t) =
+    let open Lwt.Syntax in
+    Log.debug (fun k -> k "Extra arguments: %a" Yojson.Safe.pp args.extra);
+    match Gdb.LaunchArguments.of_yojson args.extra with
     | Error s ->
       Log.err (fun k -> k "Cannot read gdb arguments: %s" s);
       Lwt.return ()
+    | Ok gdb_args ->
+      Log.debug (fun k -> k "Gdb arguments: %a" Gdb.LaunchArguments.pp gdb_args);
+      (* Normalize GDB arguments *)
+      let no_debug = Option.value ~default:false args.no_debug in
+      let cwd =
+        Option.value ~default:(Filename.dirname gdb_args.target) gdb_args.cwd
+      in
+      let env = Mi2.Dict.of_seq @@ List.to_seq gdb_args.env in
+      (* FIXME: support other values. *)
+      let tty = Mi2.GdbTty.Bool gdb_args.tty in
+      (* Initialize Mi2 module *)
+      Mi2.init
+        session.Session.debugger
+        gdb_path
+        env
+        no_debug
+        tty
+        gdb_args.cobcrunPath
+        gdb_args.targetWrapperPath
+        gdb_args.useCobcrun
+        gdb_args.sourceDirs;
+      let* () =
+        Mi2.load session.debugger
+          cwd gdb_args.target gdb_args.arguments gdb_args.group
+      in
+      let* () =
+        Debug_rpc.send_event server (module Dp.Initialized_event) ()
+      in
+      let* _started = Mi2.start session.debugger () in
+      session.started <- true; (* TODO: review this *)
+      (* TODO: handle GDB crash *)
+      Lwt.return ()
 
-  let handle_attach_ex (arg : Dp.Attach_command_ex.Arguments.t) =
+  let handle_attach_ex server session (arg : Dp.Attach_command_ex.Arguments.t) =
+    let open Lwt.Syntax in
     Log.debug (fun k -> k "Extra arguments: %a" Yojson.Safe.pp arg.extra);
     match Gdb.AttachArguments.of_yojson arg.extra with
-    | Ok gdb_arguments ->
-      Log.debug (fun k -> k "Gdb arguments: %a" Gdb.AttachArguments.pp gdb_arguments);
-      Lwt.return ()
     | Error s ->
       Log.err (fun k -> k "Cannot read gdb arguments: %s" s);
       Lwt.return ()
+    | Ok gdb_args ->
+      Log.debug (fun k -> k "Gdb arguments: %a" Gdb.AttachArguments.pp gdb_args);
+      let attachTarget =
+        match gdb_args.pid with
+        | None -> gdb_args.pid
+        | a -> a
+      in
+      if Option.is_none attachTarget then
+        error ~id:100
+        "Failed to start MI Debugger: PID or remote-debugger argument required"
+      else (
+        (* Normalize GDB arguments *)
+        let cwd =
+          Option.value ~default:(Filename.dirname gdb_args.target) gdb_args.cwd
+        in
+        let env = Mi2.Dict.of_seq @@ List.to_seq gdb_args.env in
+        (* FIXME: support other values. *)
+        let tty = Mi2.GdbTty.Bool false in
+        let no_debug = false in
+        (* Initialize Mi2 module *)
+        (* TODO: factorize this code with the code in handle_launch_ex *)
+        Mi2.init
+          session.Session.debugger
+          gdb_path
+          env
+          no_debug
+          tty
+          gdb_args.cobcrunPath
+          gdb_args.targetWrapperPath
+          gdb_args.useCobcrun
+          gdb_args.sourceDirs;
+        let* () =
+          Mi2.attach
+            session.debugger
+            cwd
+            gdb_args.target
+            gdb_args.group
+        in
+        let* () = Debug_rpc.send_event server (module Dp.Initialized_event) () in
+        let* _started = Mi2.start session.debugger () in
+        session.needContinue <- true; (* TODO: not sure should be here *)
+        session.attached <- true; (* TODO: review this *)
+        (* TODO: handle crash *)
+        Lwt.return ())
 
-  let handle_disconnect (_arg : Dp.Disconnect_command.Arguments.t) =
+  let handle_disconnect _server _session (_arg : Dp.Disconnect_command.Arguments.t) =
     Lwt.return ()
 
-  let handle_set_breakpoints (_arg : Dp.Set_breakpoints_command.Arguments.t) =
+  let handle_set_breakpoints _server _session (_arg : Dp.Set_breakpoints_command.Arguments.t) =
     let dummy = Dp.Set_breakpoints_command.Result.make ~breakpoints:[] () in
     Lwt.return dummy
 
-  let handle_threads (_arg : Dp.Threads_command.Arguments.t) =
-    let dummy = Dp.Threads_command.Result.make ~threads:[] () in
-    Lwt.return dummy
+  let handle_threads _server session (args : Dp.Threads_command.Arguments.t) =
+    let open Lwt.Syntax in
+    let* threads = Mi2.getThreads session.Session.debugger in
+    let threads =
+      List.map (fun (t : Types.Thread.t) ->
+        let name =
+          string_of_int t.id ^ ":" ^ Option.value ~default:"" t.name
+        in
+        Dp.Thread.make ~id:t.id ~name)
+        threads
+    in
+    Lwt.return @@ Dp.Threads_command.Result.make ~threads ()
 
-  let handle_stack_trace (_arg : Dp.Stack_trace_command.Arguments.t) =
-    let dummy = Dp.Stack_trace_command.Result.make ~stack_frames:[] () in
-    Lwt.return dummy
+  let encode_frame_id thread_id frame_level =
+    frame_level lsl 8 lor thread_id
 
-  let handle_scopes (_arg : Dp.Scopes_command.Arguments.t) =
-    let dummy = Dp.Scopes_command.Result.make ~scopes:[] () in
-    Lwt.return dummy
+  let decode_frame_id frame_id =
+    frame_id land 0xff, frame_id lsr 8
 
-  let handle_variables (_arg : Dp.Variables_command.Arguments.t) =
-    let dummy = Dp.Variables_command.Result.make ~variables:[] () in
-    Lwt.return dummy
+  let handle_stack_trace _server session (args : Dp.Stack_trace_command.Arguments.t) =
+    let open Lwt.Syntax in
+    let levels = Option.value ~default:0 args.levels in
+    let* stack = Mi2.getStack session.Session.debugger args.thread_id levels in
+    let stack_frames =
+      List.map (fun (elem : Types.Stack.t) ->
+        let name =
+          String.trim (elem.function_ ^ " " ^ elem.lineContents) in
+        let source =
+          Dp.Source.make
+            ~name:(Some (Filename.basename elem.file))
+            ~path:(Some elem.file)
+            ~source_reference:(Some 0) ()
+        in
+        Dp.Stack_frame.make
+          ~id:(encode_frame_id args.thread_id elem.level)
+          ~name
+          ~source:(Some source)
+          ~line:elem.line
+          ~column:0 ()
+      ) stack
+    in
+    Lwt.return @@ Dp.Stack_trace_command.Result.make ~stack_frames ()
 
-  let handle_continue (_arg : Dp.Continue_command.Arguments.t) =
-    let dummy = Dp.Continue_command.Result.make () in
-    Lwt.return dummy
+  let handle_scopes _server session (args : Dp.Scopes_command.Arguments.t) =
+    let open Lwt.Syntax in
+    let scopes = [
+      Dp.Scope.make ~name:"Local"
+        ~variables_reference:(stackHandlesStart + args.frame_id)
+        ~expensive:false ()
+    ] in
+    let* fsl = Mi2.getGlobalStorageSymbols session.Session.debugger in
+    let (scopes, gv) =
+      List.fold_left (fun (scopes, gv) (fs : Types.FileSymbols.t) ->
+        if fs.symbols <> [] then
+          let base = Util.stripPathExtension fs.filename in
+          let scope_id = List.length scopes in
+          let scopes_variables =
+            (* NOTE: evalGlobalSymbol might return rejected promises *)
+            Types.LocalizedSymbol.ofFileSymbols fs |>
+            List.map (fun s -> Mi2.evalGlobalSymbol session.debugger s)
+          in
+          let gv =
+            Types.IntMap.add scope_id (Lwt.all scopes_variables) gv in
+          let scope =
+            Dp.Scope.make ~name:("Globals " ^ base)
+              ~variables_reference:scope_id ~expensive:false () in
+          (scope :: scopes, gv)
+        else
+          (scopes, gv)
+        ) (scopes, Types.IntMap.empty) fsl
+    in
+    session.globalVariables <- gv;
+    let scopes = List.rev scopes in
+    Lwt.return @@ Dp.Scopes_command.Result.make ~scopes ()
 
-  let handle_next (_arg : Dp.Next_command.Arguments.t) =
+  (* Retrieve a scope/frame id or variable by its VSCode reference.
+     This can retrive either:
+     - a scope id (global variables)
+     - a frame id (local variables)
+     - a variable name *)
+  let lookup_variable session ref_ =
+    if ref_ < varHandlesStart then (* < 132072 *)
+      if ref_ < stackHandlesStart then (* < 1000 *)
+        Session.Int (ref_), Session.Global (* Id: 1 - 999 *)
+      else
+        Int (ref_ - stackHandlesStart), Local (* Id: 1000 - 132071 *)
+    else
+      Handles.get ref_ session.Session.variableHandles (* Id: 132072 - * *)
+
+  let make_var_ref session (dv : DebuggerVariable.t) cat =
+    (* NOTE: for locals, dv.cName is b_n,
+       for globals it is '/path/to/prog.c.h'::b_n *)
+    if session.Session.showDetails || not (StrMap.is_empty dv.children) then
+      Handles.set session.variableHandles (String dv.cName, cat)
+    else
+      0
+
+  let make_var (dv : DebuggerVariable.t) value var_ref =
+    Dp.Variable.make ~name:dv.cobName
+      ~evaluate_name:(Some dv.cobName) ~type_:(Some dv.displayableType)
+      ~value:value ~variables_reference:var_ref ()
+
+  let to_debug_protocol_variable session (dv : DebuggerVariable.t) cat =
+    let reference = make_var_ref session dv cat in
+    let value =
+      if session.showDetails then
+        dv.value ^ " " ^ dv.displayableType
+      else
+        dv.value
+    in
+    make_var dv value reference
+
+  let to_debug_protocol_variable_with_details session (dv : DebuggerVariable.t) =
+    let vars =
+      if session.Session.showDetails then
+        List.fold_left (fun vars (detail : VariableDetail.t) ->
+            let v =
+              Dp.Variable.make
+                ~name:detail.name
+                ~value:detail.value
+                ~evaluate_name:(Some dv.cobName)
+                ~type_:(Some detail.type_)
+                ~variables_reference:0 ()
+            in
+            v :: vars
+          ) [] dv.details
+      else
+        []
+    in
+    let v =
+      Dp.Variable.make
+        ~name:"value"
+        ~value:dv.value
+        ~evaluate_name:(Some dv.cobName)
+        ~variables_reference:0 ()
+    in
+    v :: vars
+
+  (* Retrieve the global variables for a given scope *)
+  let global_storage_variable_request session scope_id =
+    let open Lwt.Syntax in
+    (* NOTE: should always be found, if scopesRequest is correct *)
+    let* scope_variables =
+      Types.IntMap.find scope_id session.Session.globalVariables
+    in
+    let variables =
+      List.map (fun dv ->
+          to_debug_protocol_variable session dv Global) scope_variables
+    in
+    Lwt.return @@ Dp.Variables_command.Result.make ~variables ()
+
+  (* Retrieve the local/stack variables for a given frame *)
+  let local_storage_variable_request session frame_id =
+    let open Lwt.Syntax in
+    let thread_id, frame_level = decode_frame_id frame_id in
+    let* local_variables =
+      Mi2.getLocalStorageVariables session.Session.debugger thread_id frame_level
+    in
+    let variables =
+      List.map (fun dv ->
+          to_debug_protocol_variable session dv Local) local_variables
+    in
+    Lwt.return @@ Dp.Variables_command.Result.make ~variables ()
+
+  let child_variable_request (session : Session.t) var_name cat =
+    let open Lwt.Syntax in
+    let eval_func =
+      match cat with
+      | Session.Local ->
+          (fun mi2 cName -> Mi2.evalLocalCVariable mi2 cName ())
+      | Global ->
+          Mi2.evalGlobalCVariable
+    in
+    let* dv_opt = eval_func session.debugger var_name in
+    Lwt.return @@
+    match dv_opt with
+    | None -> []
+    | Some dv ->
+      let vars_p =
+        (* if session.showDetails then *)
+        (*   List.map Promise.resolve *)
+        (*     (toDebugProtocolVariableWithDetails gdb dv) *)
+        (* else *)
+          []
+      in
+      []
+
+    (* Option.fold ~none:[] ~some:(fun dv -> *)
+    (*     StrMap.fold (fun _n (child : DebuggerVariable.t) vars_p -> *)
+    (*         let reference = makeVarRef gdb child cat in *)
+    (*         let value_p = *)
+    (*           if gdb.showDetails then *)
+    (*             Promise.return child.displayableType *)
+    (*           else *)
+    (*             evalFunc gdb.miDebugger child.cName |> *)
+    (*             Promise.then_ ~fulfilled:(fun evaluatedChild_opt -> *)
+    (*                 Option.fold ~none:"?" ~some:( *)
+    (*                   fun (evaluatedChild: DebuggerVariable.t) -> *)
+    (*                     evaluatedChild.value) evaluatedChild_opt |> *)
+    (*                 Promise.return) *)
+    (*         in *)
+    (*         let v_p = *)
+    (*           Promise.then_ ~fulfilled:(fun value -> *)
+    (*               Promise.return (makeVar child value reference) *)
+    (*             ) value_p *)
+    (*         in *)
+    (*         (v_p :: vars_p) *)
+    (*       ) dv.children vars_p *)
+    (*   ) dv_opt |> *)
+    (* Promise.all_list |> *)
+    (* Promise.then_ ~fulfilled:(fun variables -> *)
+    (*     let variables = List.rev variables in *)
+    (*     let body = VariablesResponse.M.create ~variables in *)
+    (*     VariablesResponse.set_body vResponse body; *)
+    (*     sendResponse gdb.session ~response; *)
+    (*     Promise.return () *)
+    (*   ) *)
+    (*   ) ~rejected:(fun err -> *)
+    (*     sendErrorResponse gdb.session ~response ~codeOrMessage:1 *)
+    (*       ~format:("Could not expand variable: " ^ *)
+    (*                (Node.JsError.message err)) (); *)
+    (*     Promise.return () *)
+    (*   ) |> ignore *)
+
+  let handle_variables _server session (args : Dp.Variables_command.Arguments.t) =
+    match lookup_variable session args.variables_reference with
+    | Int (scope_id), Global ->
+        global_storage_variable_request session scope_id
+    | Int (frame_id), Local ->
+        local_storage_variable_request session frame_id
+    | String (var_name), _ -> assert false
+    (* let dummy = Dp.Variables_command.Result.make ~variables:[] () in *)
+    (* Lwt.return dummy *)
+
+  let handle_pause _server session (_args : Dp.Pause_command.Arguments.t) =
+    let open Lwt.Syntax in
+    let* _done = Mi2.interrupt session.Session.debugger in
+    (* TODO: handle error of continue. *)
     Lwt.return ()
 
-  let handle_step_in (_arg : Dp.Step_in_command.Arguments.t) =
+  let handle_continue _server session (_args : Dp.Continue_command.Arguments.t) =
+    let open Lwt.Syntax in
+    let* _done = Mi2.continue session.Session.debugger in
+    (* TODO: handle error of continue. *)
+    Lwt.return @@ Dp.Continue_command.Result.make ()
+
+  let handle_next _server session (_args : Dp.Next_command.Arguments.t) =
+    let open Lwt.Syntax in
+    let* _done = Mi2.stepOver session.Session.debugger in
+    (* TODO: handle error of step in *)
     Lwt.return ()
 
-  let handle_step_out (_arg : Dp.Step_out_command.Arguments.t) =
+  let handle_step_in _server session (_args : Dp.Step_in_command.Arguments.t) =
+    let open Lwt.Syntax in
+    let* _done = Mi2.stepInto session.Session.debugger in
+    (* TODO: handle error of step in *)
+    Lwt.return ()
+
+  let handle_step_out _server session (_args : Dp.Step_out_command.Arguments.t) =
+    let open Lwt.Syntax in
+    let* _done = Mi2.stepOut session.Session.debugger in
+    (* TODO: handle error of step in *)
+    Lwt.return ()
+
+  (* TODO: optional? *)
+  let handle_evaluate _server (session : Session.t) (args : Dp.Evaluate_command.Arguments.t) =
+    let open Lwt.Syntax in
+    let frame_id = Option.value ~default:0 args.frame_id in
+    let thread_id, frame_level = decode_frame_id frame_id in
+    match args.context with
+    | Some (Watch | Variables | Hover) ->
+        let* res_opt =
+          Mi2.evalExpression session.debugger args.expression thread_id frame_level
+        in
+        let result = Option.value ~default:"not available" res_opt in
+        let presentation_hint =
+          Dp.Variable_presentation_hint.make ~kind:(Some Data) ()
+        in
+        Lwt.return @@ Dp.Evaluate_command.Result.make
+         ~variables_reference:0
+         ~presentation_hint:(Some presentation_hint)
+         ~result
+         ()
+    | Some (Repl | Clipboard | Custom (_)) | None ->
+        let* err_opt =
+          Mi2.sendUserInput session.debugger args.expression
+            ~threadId:thread_id ~frameLevel:frame_level ()
+        in
+        (* TODO: handle promise error? *)
+        let result =
+          match err_opt with
+          | None -> ""
+          | Some v -> Obj.magic v
+        in
+        Lwt.return @@ Dp.Evaluate_command.Result.make
+          ~variables_reference:0
+          ~result
+          ()
+
+  let handle_goto_targets _server (session : Session.t) (args : Dp.Goto_targets_command.Arguments.t) =
+    let open Lwt.Syntax in
+    let name = Option.get args.source.name in
+    let path = Option.get args.source.path in
+    let line = Obj.magic 0 in
+    let column = Obj.magic 0 in
+    let* _done = Mi2.goto session.debugger path line in
+    let targets = [
+      Dp.Goto_target.make ~id:1 ~label:name ?column ~line ()
+    ] in
+    Lwt.return @@ Dp.Goto_targets_command.Result.make ~targets ()
+
+  (* NOTE: goto actually performed in gotoTargetsRequest *)
+  let handle_goto _server _session (_args : Dp.Goto_command.Arguments.t) =
     Lwt.return ()
 
   (* Optionals *)
 
-  let handle_configuration_done (_arg : Dp.Configuration_done_command.Arguments.t) =
-    Lwt.return ()
+  let handle_configuration_done _server (session : Session.t) (_args : Dp.Configuration_done_command.Arguments.t) =
+    let open Lwt.Syntax in
+    Mi2.Event.emit session.debugger Mi2.Event.DebugReady ();
+    if session.needContinue then
+      let* _done = Mi2.continue session.debugger in
+      Lwt.return_unit
+    else Lwt.return_unit
 
-  let handle_restart (_arg : Dp.Restart_command.Arguments.t) =
-    Lwt.return ()
+  let handle_set_variable server (session : Session.t) (args : Dp.Set_variable_command.Arguments.t) =
+    let open Lwt.Syntax in
+    if session.showDetails && args.name <> "value" then
+      error ~id:14 "%s cannot be changed" args.name
+    else
+      let* invalidated_areas =
+        match lookup_variable session args.variables_reference with
+        | Int _, Local -> (* top / raw storage *)
+            (* NOTE: only happens when session.showDetails is false *)
+            (* name is COBOL name *)
+            Mi2.setLocalCobolVariable session.debugger args.name args.value
+        | String c_name, Local when session.showDetails (* sub / field *) ->
+            Mi2.setLocalCVariable session.debugger c_name args.value
+        | String _c_name, Local (* not session.showDetails *) (* sub / field *) ->
+            (* name is COBOL name, c_name is short C name (b_n) *)
+            Mi2.setLocalCobolVariable session.debugger args.name args.value
+        | Int scope_id, Global -> (* top / raw storage *) (
+            (* NOTE: only happens when session.showDetails is false *)
+            match Types.IntMap.find scope_id session.globalVariables with
+            | exception Not_found ->
+                (* NOTE: should always be found if [handle_scopes] is correct. *)
+                assert false
+            | scope_variables -> (
+                let* scope_variables in
+                (* name is COBOL name *)
+                let p (dv : DebuggerVariable.t) = dv.cobName = args.name in
+                match List.find p scope_variables with
+                | exception Not_found -> Lwt.return []
+                | dv ->
+                    (* cName is full C name
+                       (ie '/path/to/prog.c.h'::b_n) *)
+                    Mi2.setGlobalCVariable session.debugger dv.cName args.value))
+        | String c_name, Global when session.showDetails -> (* sub / field *)
+            (* name is "value", c_name is full C name
+               (ie '/path/to/prog.c.h'::b_n / f_n) *)
+            Mi2.setGlobalCVariable session.debugger c_name args.value
+        | String c_name, Global -> (* not session.showDetails *) (* sub / field *) (
+            (* name is COBOL name, c_name is full C name
+               (ie '/path/to/prog.c.h'::b_n) *)
+            match Mi2.lookupGlobalCobolWithCName session.debugger args.name c_name with
+            | None -> Lwt.return []
+            | Some (dv : DebuggerVariable.t) ->
+                Mi2.setGlobalCVariable session.debugger dv.cName args.value)
+      in
+      match invalidated_areas with
+      | [] ->
+        Lwt.return @@ Dp.Set_variable_command.Result.make ~value:args.value ()
+      | _ ->
+        let areas = List.map (fun a -> Dp.Invalidated_areas.Custom a) invalidated_areas in
+        let* () =
+          let payload = Dp.Invalidated_event.Payload.make ~areas:(Some areas) () in
+          Debug_rpc.send_event server (module Dp.Invalidated_event) payload
+        in
+        Lwt.return @@ Dp.Set_variable_command.Result.make ~value:args.value ()
 
-  let handle_set_variable (_arg : Dp.Set_variable_command.Arguments.t) =
-    let dummy =
-      Dp.Set_variable_command.Result.make ~value:"dummy" ()
-    in
-    Lwt.return dummy
-
-  let all = Capability_set.(
-    empty
+  let all server session =
+    let add m h = Capability_set.add m (h server session) in
+    Capability_set.empty
     |> add (module Dp.Launch_command_ex) handle_launch_ex
     |> add (module Dp.Attach_command_ex) handle_attach_ex
     |> add (module Dp.Disconnect_command) handle_disconnect
@@ -403,14 +886,17 @@ module Handlers = struct
     |> add (module Dp.Stack_trace_command) handle_stack_trace
     |> add (module Dp.Scopes_command) handle_scopes
     |> add (module Dp.Variables_command) handle_variables
+    |> add (module Dp.Pause_command) handle_pause
     |> add (module Dp.Continue_command) handle_continue
     |> add (module Dp.Next_command) handle_next
     |> add (module Dp.Step_in_command) handle_step_in
     |> add (module Dp.Step_out_command) handle_step_out
+    |> add (module Dp.Evaluate_command) handle_evaluate
+    |> add (module Dp.Goto_targets_command) handle_goto_targets
+    |> add (module Dp.Goto_command) handle_goto
     |> add (module Dp.Configuration_done_command) handle_configuration_done
-    |> add (module Dp.Restart_command) handle_restart
     |> add (module Dp.Set_variable_command) handle_set_variable
-    |> seal)
+    |> Capability_set.seal
 end
 
 let pp_sockaddr ppf sockaddr =
@@ -436,7 +922,8 @@ let run_server fd sockaddr =
     Lwt_io.establish_server_with_client_address ~fd ~no_close:true sockaddr
     @@ fun _sockaddr (in_, out) ->
       let server = Debug_rpc.create ~in_ ~out () in
-      Capability_set.set_commands server Handlers.all;
+      let session = Session.create () in
+      Capability_set.set_commands server Handlers.(all server session);
       Debug_rpc.start server
   in
   Lwt.return_unit
