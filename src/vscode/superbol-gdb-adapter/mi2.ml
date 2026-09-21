@@ -44,6 +44,16 @@ type t = {
   sessionId : int;
 }
 
+type system =
+  | Unix
+  | Windows
+  | Macos
+
+let detect_system () =
+  if Sys.unix then Unix
+  else if Sys.win32 then Windows
+  else Macos (* FIXME *)
+
 exception Error of string
 
 let error ?src fmt =
@@ -156,8 +166,8 @@ module Event = struct
       ~eventName:(toString event)
       ~listener:(wrapListener event listener)
 
-  let oncep (type a) mi2 (event : a t) =
-    Promise.make @@ fun ~resolve ~reject:_ -> once mi2 event resolve
+  let oncep (type a) _mi2 (_event : a t) = assert false
+    (* Promise.make @@ fun ~resolve ~reject:_ -> once mi2 event resolve *)
 
 end
 
@@ -170,7 +180,7 @@ let genSessionId =
     counter := !counter + 1;
     if !counter >= 512 then
       counter := 1;
-    !counter * 4194304 + Node.Process.pid
+    !counter * 4194304 + (Unix.getpid ())
 
 let stdin mi2 fmt =
   Format.kasprintf (fun s ->
@@ -616,9 +626,14 @@ and start mi2 ?attachTarget () : bool Lwt.t =
   let send cmd expected =
     let%lwt (rnode : MiNode.result) = sendCommand mi2 cmd () in
     (* NOTE: this clears the terminal upon start, to hide a GDB warning *)
-    Option.iter (fun ttyName ->
-        Node.Fs.writeFileSync
-          ("/dev/" ^ ttyName) "\x1B[2J\x1B[H") mi2.ttyName;
+    let%lwt () =
+      match mi2.ttyName with
+      | None -> Lwt.return_unit
+      | Some ttyName ->
+        let path = "/dev" // ttyName in
+        Lwt_io.with_file ~mode:Output path @@ fun oc ->
+          Lwt_io.write oc "\x1B[2J\x1B[H"
+    in
     if rnode.class_ = expected then Lwt.return false
     else Lwt.fail @@ error "Unexpected outcome on start"
   in
@@ -1047,7 +1062,7 @@ and setDebuggerVariable mi2 (dv : DebuggerVariable.t) rawValue =
     else
       Lwt.return []
   with exn ->
-    let msg = Node.JsError.message exn in
+    let msg = Printexc.to_string exn in
     (* NOTE: cob_put_field_str added (06/2020) in GC 3.1 (12/2020) *)
     let re = Str.regexp_string "No symbol \"cob_put_field_str\"" in
     if Util.matches re msg then (
@@ -1173,8 +1188,10 @@ and rePsLine = Str.regexp_case_fold
 
 and findTty mi2 : (string * int) option Lwt.t =
   let ttyPrefix =
-    if Node.Process.platform = "darwin" then "ttys"
-    else "pts/"
+    match detect_system () with
+    | Unix -> "pts/"
+    | Macos -> "ttys"
+    | Windows -> assert false
   in
   let sleepVal = string_of_int mi2.sessionId in
   let command = Lwt_process.shell "ps -A -o tty,pid,command" in

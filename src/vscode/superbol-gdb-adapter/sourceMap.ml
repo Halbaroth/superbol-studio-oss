@@ -84,7 +84,7 @@ let filterLines sm f =
 (* On Win32, if a filename exists both as uppercase and lowercase,
    use the lowercase name, otherwise use the name as provided *)
 let normalizeExistingFilename f =
-  if f <> "" && Node.Process.platform = "win32" then
+  if f <> "" && Sys.win32 then
     let lc = String.lowercase_ascii f in
     let uc = String.uppercase_ascii f in
     if Sys.file_exists lc && Sys.file_exists uc then lc
@@ -145,24 +145,21 @@ let reSubroutine = Str.regexp_case_fold
 let reFramePtr = Str.regexp_case_fold
     {|frame_ptr--;|}
 
+let (//) = Filename.concat
+
 let rec create cwd cobFiles sourceDirs =
-
-  let cwd = Node.Fs.realpathSync (Node.Path.resolve [cwd]) in
-
+  let cwd = Unix.realpath cwd in
   let sourceDirs =
     List.filter_map (fun sd ->
-        let sd = Node.Path.resolve [cwd; sd] in
+        let sd = Unix.realpath (cwd // sd) in
         if Sys.file_exists sd then
-          Some (normalizeExistingFilename (Node.Fs.realpathSync sd))
+          Some (normalizeExistingFilename (Unix.realpath sd))
         else
           None
       ) sourceDirs
   in
-
   let sourceDirs = sourceDirs @ [cwd] in
-
   let sm = { empty with cwd; sourceDirs } in
-
   List.fold_left (fun sm cobolFile ->
       let cFile_opt = lookupSourceFile sm (getCFile cobolFile) in
       match cFile_opt with
@@ -208,7 +205,7 @@ and unregister sm cFile =
 and ensureAbsolute sm cFile =
   let cFile =
     if Filename.is_relative cFile then
-      Node.Path.resolve [sm.cwd; cFile]
+      Unix.realpath (sm.cwd // cFile)
     else cFile
   in
   let basename = Filename.basename cFile in
@@ -242,8 +239,7 @@ and parse sm cFile =
             (* Handle includes (.c) *)
             if Util.matches reFileInclude line then
               let cFile = Util.group line 1 in
-              let cFile =
-                Node.Path.resolve [Filename.dirname rootCFile; cFile] in
+              let cFile = Unix.realpath ((Filename.dirname rootCFile) // cFile) in
               let sm, gacc = parse_aux sm gacc cFile rootCFile in
               sm, gacc, lacc
 
@@ -264,11 +260,13 @@ and parse sm cFile =
                 if not (Filename.is_relative filename) then filename
                 else
                   let cobFile =
-                    Node.Path.resolve [Filename.dirname cFile; filename] in
+                    Unix.realpath ((Filename.dirname cFile) // filename)
+                  in
                   if Sys.file_exists cobFile then cobFile
                   else
                     let cobFile =
-                      Node.Path.resolve [Filename.dirname cFile; filebase] in
+                      Unix.realpath ((Filename.dirname cFile) // filebase)
+                    in
                     if Sys.file_exists cobFile then cobFile
                     else Util.unoptString (lookupSourceFile sm filename)
               in
@@ -485,10 +483,8 @@ let findGlobalByCobol sm ?cFile cobName =
 let hasLineCobol sm cFile cLine =
   let cFile = normalizeExistingFilename cFile in
   let cFile =
-    if Filename.is_relative cFile then
-      Node.Path.join [sm.cwd; cFile]
-    else
-      cFile
+    if Filename.is_relative cFile then sm.cwd // cFile
+    else cFile
   in
   StrMap.exists (fun cFile' imap ->
       cFile = cFile' && IntMap.mem cLine imap

@@ -486,7 +486,7 @@ module Handlers = struct
         (* TODO: handle crash *)
         Lwt.return ())
 
-  let handle_disconnect _server (session : Session.t) (args : Dp.Disconnect_command.Arguments.t) =
+  let handle_disconnect _server (session : Session.t) (_args : Dp.Disconnect_command.Arguments.t) =
     if session.attached then
       let%lwt _done = Mi2.detach session.debugger in
       Lwt.return_unit
@@ -665,66 +665,49 @@ module Handlers = struct
       | Global ->
           Mi2.evalGlobalCVariable
     in
-    let%lwt dv_opt = eval_func session.debugger var_name in
-    Lwt.return @@
-    match dv_opt with
-    | None -> []
-    | Some dv ->
-      let vars_p =
-        (* if session.showDetails then *)
-        (*   List.map Promise.resolve *)
-        (*     (toDebugProtocolVariableWithDetails gdb dv) *)
-        (* else *)
-          []
-      in
-      []
-
-    (* Option.fold ~none:[] ~some:(fun dv -> *)
-    (*     StrMap.fold (fun _n (child : DebuggerVariable.t) vars_p -> *)
-    (*         let reference = makeVarRef gdb child cat in *)
-    (*         let value_p = *)
-    (*           if gdb.showDetails then *)
-    (*             Promise.return child.displayableType *)
-    (*           else *)
-    (*             evalFunc gdb.miDebugger child.cName |> *)
-    (*             Promise.then_ ~fulfilled:(fun evaluatedChild_opt -> *)
-    (*                 Option.fold ~none:"?" ~some:( *)
-    (*                   fun (evaluatedChild: DebuggerVariable.t) -> *)
-    (*                     evaluatedChild.value) evaluatedChild_opt |> *)
-    (*                 Promise.return) *)
-    (*         in *)
-    (*         let v_p = *)
-    (*           Promise.then_ ~fulfilled:(fun value -> *)
-    (*               Promise.return (makeVar child value reference) *)
-    (*             ) value_p *)
-    (*         in *)
-    (*         (v_p :: vars_p) *)
-    (*       ) dv.children vars_p *)
-    (*   ) dv_opt |> *)
-    (* Promise.all_list |> *)
-    (* Promise.then_ ~fulfilled:(fun variables -> *)
-    (*     let variables = List.rev variables in *)
-    (*     let body = VariablesResponse.M.create ~variables in *)
-    (*     VariablesResponse.set_body vResponse body; *)
-    (*     sendResponse gdb.session ~response; *)
-    (*     Promise.return () *)
-    (*   ) *)
-    (*   ) ~rejected:(fun err -> *)
-    (*     sendErrorResponse gdb.session ~response ~codeOrMessage:1 *)
-    (*       ~format:("Could not expand variable: " ^ *)
-    (*                (Node.JsError.message err)) (); *)
-    (*     Promise.return () *)
-    (*   ) |> ignore *)
+    let%lwt variables =
+      match%lwt eval_func session.debugger var_name with
+      | None -> Lwt.return []
+      | Some dv ->
+        let variables =
+          if session.showDetails then
+            to_debug_protocol_variable_with_details session dv
+          else
+            []
+        in
+        let%lwt (l : Dp.Variable.t list) =
+          StrMap.to_seq dv.children
+          |> Lwt_seq.of_seq
+          |> Lwt_seq.map_s
+            (fun (_n, (child : DebuggerVariable.t)) ->
+              let reference = make_var_ref session child cat in
+              let%lwt value =
+                if session.showDetails then
+                  Lwt.return child.displayableType
+                else
+                  match%lwt eval_func session.debugger child.cName with
+                  | None ->
+                    Lwt.return "?"
+                  | Some evaluated_child ->
+                    Lwt.return evaluated_child.value
+              in
+              Lwt.return @@ make_var child value reference)
+          |> Lwt_seq.to_list
+        in
+        (* REVIEW: simplify *)
+        Lwt.return ((List.rev l) @ variables)
+    in
+    let variables = List.rev variables in
+    Lwt.return @@ Dp.Variables_command.Result.make ~variables ()
 
   let handle_variables _server session (args : Dp.Variables_command.Arguments.t) =
     match lookup_variable session args.variables_reference with
-    | Int (scope_id), Global ->
+    | Int scope_id, Global ->
         global_storage_variable_request session scope_id
-    | Int (frame_id), Local ->
+    | Int frame_id, Local ->
         local_storage_variable_request session frame_id
-    | String (var_name), _ -> assert false
-    (* let dummy = Dp.Variables_command.Result.make ~variables:[] () in *)
-    (* Lwt.return dummy *)
+    | String var_name, cat ->
+        child_variable_request session var_name cat
 
   let handle_pause _server session (_args : Dp.Pause_command.Arguments.t) =
     let%lwt _done = Mi2.interrupt session.Session.debugger in

@@ -36,81 +36,8 @@ module Vscode = struct
   end
 end
 
-module Promise = struct
-  type 'a t = 'a Lwt.t
-
-  type error
-
-  let make _ : 'a t = assert false
-  let reject _ : 'a t = assert false
-  let resolve _ : 'a t = assert false
-  let all_list (_ : 'a t list) : 'a list t = assert false
-  let return _ : 'a t = assert false
-  let then_ ?rejected:_ ~fulfilled:_ _ : _ t = assert false
-end
-
 (* FIXME: remove NODE *)
 module Node = struct
-  type timeout
-  let setTimeout _ _ : timeout = assert false
-  let clearTimeout (_ : timeout) : unit = assert false
-
-  module JsError = struct
-    let message _ : string = assert false
-  end
-
-  module Process = struct
-    let platform = "linux"
-    let pid = 0
-
-    let kill _ _ : unit = assert false
-  end
-
-  module Buffer = struct
-    let toString _ : string = assert false
-  end
-
-  module Path = struct
-    let resolve _ = assert false
-    let join _ = assert false
-  end
-
-  module Fs = struct
-    let realpathSync _ : string = assert false
-    let existsSync _ : bool = assert false
-    let writeFileSync _ _ : unit = assert false
-  end
-
-  module Stream = struct
-    module Readable = struct
-      let on _ _ : unit = assert false
-    end
-
-    module Writable = struct
-      let write ?callback:_ _ _ () : unit = assert false
-    end
-  end
-
-  module ChildProcess = struct
-    type t
-    type return = { stdout : string }
-
-    module Options = struct
-      type t
-
-      let create ?cwd:_ ?detached:_ ?stdio:_ ?env:_ () = assert false
-    end
-
-    let exec _ : t = assert false
-    let on _ _ : unit = assert false
-    let spawn_process _cmd _args ?options:_ () = assert false
-    let get_stdin _ : string = assert false
-    let get_stdout _ : string = assert false
-    let get_stderr _ : string = assert false
-    let get_pid _ : int = assert false
-    let unref (_ : t) : unit = assert false
-  end
-
   module Events = struct
     module EventEmitter = struct
       type t
