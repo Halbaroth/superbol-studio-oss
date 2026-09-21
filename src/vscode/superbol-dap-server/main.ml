@@ -397,7 +397,6 @@ module Handlers = struct
       raise (Debug_rpc.Error_with_message msg)) fmt
 
   let handle_launch_ex server session (args : Dp.Launch_command_ex.Arguments.t) =
-    let open Lwt.Syntax in
     Log.debug (fun k -> k "Extra arguments: %a" Yojson.Safe.pp args.extra);
     match Gdb.LaunchArguments.of_yojson args.extra with
     | Error s ->
@@ -424,20 +423,19 @@ module Handlers = struct
         gdb_args.targetWrapperPath
         gdb_args.useCobcrun
         gdb_args.sourceDirs;
-      let* () =
+      let%lwt () =
         Mi2.load session.debugger
           cwd gdb_args.target gdb_args.arguments gdb_args.group
       in
-      let* () =
+      let%lwt () =
         Debug_rpc.send_event server (module Dp.Initialized_event) ()
       in
-      let* _started = Mi2.start session.debugger () in
+      let%lwt _started = Mi2.start session.debugger () in
       session.started <- true; (* TODO: review this *)
       (* TODO: handle GDB crash *)
       Lwt.return ()
 
   let handle_attach_ex server session (arg : Dp.Attach_command_ex.Arguments.t) =
-    let open Lwt.Syntax in
     Log.debug (fun k -> k "Extra arguments: %a" Yojson.Safe.pp arg.extra);
     match Gdb.AttachArguments.of_yojson arg.extra with
     | Error s ->
@@ -474,30 +472,34 @@ module Handlers = struct
           gdb_args.targetWrapperPath
           gdb_args.useCobcrun
           gdb_args.sourceDirs;
-        let* () =
+        let%lwt () =
           Mi2.attach
             session.debugger
             cwd
             gdb_args.target
             gdb_args.group
         in
-        let* () = Debug_rpc.send_event server (module Dp.Initialized_event) () in
-        let* _started = Mi2.start session.debugger () in
+        let%lwt () = Debug_rpc.send_event server (module Dp.Initialized_event) () in
+        let%lwt _started = Mi2.start session.debugger () in
         session.needContinue <- true; (* TODO: not sure should be here *)
         session.attached <- true; (* TODO: review this *)
         (* TODO: handle crash *)
         Lwt.return ())
 
-  let handle_disconnect _server _session (_arg : Dp.Disconnect_command.Arguments.t) =
-    Lwt.return ()
+  let handle_disconnect _server (session : Session.t) (args : Dp.Disconnect_command.Arguments.t) =
+    if session.attached then
+      let%lwt _done = Mi2.detach session.debugger in
+      Lwt.return_unit
+    else
+      let%lwt _done = Mi2.stop session.debugger in
+      Lwt.return_unit
 
-  let handle_set_breakpoints _server _session (_arg : Dp.Set_breakpoints_command.Arguments.t) =
+  let handle_set_breakpoints _server _session (_args : Dp.Set_breakpoints_command.Arguments.t) =
     let dummy = Dp.Set_breakpoints_command.Result.make ~breakpoints:[] () in
     Lwt.return dummy
 
-  let handle_threads _server session (args : Dp.Threads_command.Arguments.t) =
-    let open Lwt.Syntax in
-    let* threads = Mi2.getThreads session.Session.debugger in
+  let handle_threads _server session (_args : Dp.Threads_command.Arguments.t) =
+    let%lwt threads = Mi2.getThreads session.Session.debugger in
     let threads =
       List.map (fun (t : Types.Thread.t) ->
         let name =
@@ -515,9 +517,8 @@ module Handlers = struct
     frame_id land 0xff, frame_id lsr 8
 
   let handle_stack_trace _server session (args : Dp.Stack_trace_command.Arguments.t) =
-    let open Lwt.Syntax in
     let levels = Option.value ~default:0 args.levels in
-    let* stack = Mi2.getStack session.Session.debugger args.thread_id levels in
+    let%lwt stack = Mi2.getStack session.Session.debugger args.thread_id levels in
     let stack_frames =
       List.map (fun (elem : Types.Stack.t) ->
         let name =
@@ -539,13 +540,12 @@ module Handlers = struct
     Lwt.return @@ Dp.Stack_trace_command.Result.make ~stack_frames ()
 
   let handle_scopes _server session (args : Dp.Scopes_command.Arguments.t) =
-    let open Lwt.Syntax in
     let scopes = [
       Dp.Scope.make ~name:"Local"
         ~variables_reference:(stackHandlesStart + args.frame_id)
         ~expensive:false ()
     ] in
-    let* fsl = Mi2.getGlobalStorageSymbols session.Session.debugger in
+    let%lwt fsl = Mi2.getGlobalStorageSymbols session.Session.debugger in
     let (scopes, gv) =
       List.fold_left (fun (scopes, gv) (fs : Types.FileSymbols.t) ->
         if fs.symbols <> [] then
@@ -635,9 +635,8 @@ module Handlers = struct
 
   (* Retrieve the global variables for a given scope *)
   let global_storage_variable_request session scope_id =
-    let open Lwt.Syntax in
     (* NOTE: should always be found, if scopesRequest is correct *)
-    let* scope_variables =
+    let%lwt scope_variables =
       Types.IntMap.find scope_id session.Session.globalVariables
     in
     let variables =
@@ -648,9 +647,8 @@ module Handlers = struct
 
   (* Retrieve the local/stack variables for a given frame *)
   let local_storage_variable_request session frame_id =
-    let open Lwt.Syntax in
     let thread_id, frame_level = decode_frame_id frame_id in
-    let* local_variables =
+    let%lwt local_variables =
       Mi2.getLocalStorageVariables session.Session.debugger thread_id frame_level
     in
     let variables =
@@ -660,7 +658,6 @@ module Handlers = struct
     Lwt.return @@ Dp.Variables_command.Result.make ~variables ()
 
   let child_variable_request (session : Session.t) var_name cat =
-    let open Lwt.Syntax in
     let eval_func =
       match cat with
       | Session.Local ->
@@ -668,7 +665,7 @@ module Handlers = struct
       | Global ->
           Mi2.evalGlobalCVariable
     in
-    let* dv_opt = eval_func session.debugger var_name in
+    let%lwt dv_opt = eval_func session.debugger var_name in
     Lwt.return @@
     match dv_opt with
     | None -> []
@@ -730,43 +727,37 @@ module Handlers = struct
     (* Lwt.return dummy *)
 
   let handle_pause _server session (_args : Dp.Pause_command.Arguments.t) =
-    let open Lwt.Syntax in
-    let* _done = Mi2.interrupt session.Session.debugger in
+    let%lwt _done = Mi2.interrupt session.Session.debugger in
     (* TODO: handle error of continue. *)
     Lwt.return ()
 
   let handle_continue _server session (_args : Dp.Continue_command.Arguments.t) =
-    let open Lwt.Syntax in
-    let* _done = Mi2.continue session.Session.debugger in
+    let%lwt _done = Mi2.continue session.Session.debugger in
     (* TODO: handle error of continue. *)
     Lwt.return @@ Dp.Continue_command.Result.make ()
 
   let handle_next _server session (_args : Dp.Next_command.Arguments.t) =
-    let open Lwt.Syntax in
-    let* _done = Mi2.stepOver session.Session.debugger in
+    let%lwt _done = Mi2.stepOver session.Session.debugger in
     (* TODO: handle error of step in *)
     Lwt.return ()
 
   let handle_step_in _server session (_args : Dp.Step_in_command.Arguments.t) =
-    let open Lwt.Syntax in
-    let* _done = Mi2.stepInto session.Session.debugger in
+    let%lwt _done = Mi2.stepInto session.Session.debugger in
     (* TODO: handle error of step in *)
     Lwt.return ()
 
   let handle_step_out _server session (_args : Dp.Step_out_command.Arguments.t) =
-    let open Lwt.Syntax in
-    let* _done = Mi2.stepOut session.Session.debugger in
+    let%lwt _done = Mi2.stepOut session.Session.debugger in
     (* TODO: handle error of step in *)
     Lwt.return ()
 
   (* TODO: optional? *)
   let handle_evaluate _server (session : Session.t) (args : Dp.Evaluate_command.Arguments.t) =
-    let open Lwt.Syntax in
     let frame_id = Option.value ~default:0 args.frame_id in
     let thread_id, frame_level = decode_frame_id frame_id in
     match args.context with
     | Some (Watch | Variables | Hover) ->
-        let* res_opt =
+        let%lwt res_opt =
           Mi2.evalExpression session.debugger args.expression thread_id frame_level
         in
         let result = Option.value ~default:"not available" res_opt in
@@ -779,28 +770,26 @@ module Handlers = struct
          ~result
          ()
     | Some (Repl | Clipboard | Custom (_)) | None ->
-        let* err_opt =
-          Mi2.sendUserInput session.debugger args.expression
-            ~threadId:thread_id ~frameLevel:frame_level ()
-        in
-        (* TODO: handle promise error? *)
-        let result =
-          match err_opt with
-          | None -> ""
-          | Some v -> Obj.magic v
+        let%lwt result =
+          match%lwt
+            Mi2.sendUserInput session.debugger args.expression
+              ~threadId:thread_id ~frameLevel:frame_level ();
+          with
+          | _ -> Lwt.return ""
+          | exception (Mi2.Error s) -> Lwt.return s
         in
         Lwt.return @@ Dp.Evaluate_command.Result.make
           ~variables_reference:0
           ~result
           ()
 
-  let handle_goto_targets _server (session : Session.t) (args : Dp.Goto_targets_command.Arguments.t) =
-    let open Lwt.Syntax in
+  let handle_goto_targets _server (session : Session.t)
+    (args : Dp.Goto_targets_command.Arguments.t) =
     let name = Option.get args.source.name in
     let path = Option.get args.source.path in
     let line = Obj.magic 0 in
     let column = Obj.magic 0 in
-    let* _done = Mi2.goto session.debugger path line in
+    let%lwt _done = Mi2.goto session.debugger path line in
     let targets = [
       Dp.Goto_target.make ~id:1 ~label:name ?column ~line ()
     ] in
@@ -812,20 +801,20 @@ module Handlers = struct
 
   (* Optionals *)
 
-  let handle_configuration_done _server (session : Session.t) (_args : Dp.Configuration_done_command.Arguments.t) =
-    let open Lwt.Syntax in
+  let handle_configuration_done _server (session : Session.t)
+    (_args : Dp.Configuration_done_command.Arguments.t) =
     Mi2.Event.emit session.debugger Mi2.Event.DebugReady ();
     if session.needContinue then
-      let* _done = Mi2.continue session.debugger in
+      let%lwt _done = Mi2.continue session.debugger in
       Lwt.return_unit
     else Lwt.return_unit
 
-  let handle_set_variable server (session : Session.t) (args : Dp.Set_variable_command.Arguments.t) =
-    let open Lwt.Syntax in
+  let handle_set_variable server (session : Session.t)
+    (args : Dp.Set_variable_command.Arguments.t) =
     if session.showDetails && args.name <> "value" then
       error ~id:14 "%s cannot be changed" args.name
     else
-      let* invalidated_areas =
+      let%lwt invalidated_areas =
         match lookup_variable session args.variables_reference with
         | Int _, Local -> (* top / raw storage *)
             (* NOTE: only happens when session.showDetails is false *)
@@ -843,7 +832,7 @@ module Handlers = struct
                 (* NOTE: should always be found if [handle_scopes] is correct. *)
                 assert false
             | scope_variables -> (
-                let* scope_variables in
+                let%lwt scope_variables in
                 (* name is COBOL name *)
                 let p (dv : DebuggerVariable.t) = dv.cobName = args.name in
                 match List.find p scope_variables with
@@ -869,7 +858,7 @@ module Handlers = struct
         Lwt.return @@ Dp.Set_variable_command.Result.make ~value:args.value ()
       | _ ->
         let areas = List.map (fun a -> Dp.Invalidated_areas.Custom a) invalidated_areas in
-        let* () =
+        let%lwt () =
           let payload = Dp.Invalidated_event.Payload.make ~areas:(Some areas) () in
           Debug_rpc.send_event server (module Dp.Invalidated_event) payload
         in
@@ -916,9 +905,8 @@ let with_open_socket k =
   Fun.protect ~finally @@ fun () -> k @@ Lwt_unix.of_unix_file_descr fd
 
 let run_server fd sockaddr =
-  let open Lwt.Syntax in
   Log.info (fun k -> k "listening on: %a" pp_sockaddr sockaddr);
-  let* _server =
+  let%lwt _server =
     Lwt_io.establish_server_with_client_address ~fd ~no_close:true sockaddr
     @@ fun _sockaddr (in_, out) ->
       let server = Debug_rpc.create ~in_ ~out () in
@@ -929,7 +917,6 @@ let run_server fd sockaddr =
   Lwt.return_unit
 
 let () =
-  let open Lwt.Syntax in
   Logs.set_reporter @@ Reporter.lwt_reporter ();
   Logs.set_level ~all:true (Some Logs.Debug);
   match Cmd.parse () with
@@ -945,5 +932,5 @@ let () =
     let sockaddr = Unix.ADDR_UNIX socket_path in
     let forever, _ = Lwt.wait () in
     Lwt_main.run @@
-      let* _ = run_server fd sockaddr in
+      let%lwt _ = run_server fd sockaddr in
       forever

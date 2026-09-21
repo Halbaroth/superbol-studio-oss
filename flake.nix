@@ -38,6 +38,7 @@
                 js_of_ocaml
                 dap
                 ppx_fields_conv
+                lwt_ppx
               ])
               ++ (with pkgs.ocamlProPackages; [
                 drom

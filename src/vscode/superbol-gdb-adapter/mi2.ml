@@ -34,7 +34,7 @@ type t = {
   mutable map : SourceMap.t;
   mutable tok : int;
   mutable handlers : (MiNode.result -> unit) IntMap.t;
-  mutable process : Node.ChildProcess.t option;
+  mutable process : Lwt_process.process_full option;
   mutable ttyName : string option;
   mutable ttyPid : int option;
   mutable newConsole : bool;
@@ -172,17 +172,16 @@ let genSessionId =
       counter := 1;
     !counter * 4194304 + Node.Process.pid
 
-let stdin mi2 ?cb fmt =
+let stdin mi2 fmt =
   Format.kasprintf (fun s ->
     match mi2.process with
-    | Some (process) ->
+    | Some process ->
         Log.debug ["stdin: "; s];
         (* We must insert a newline to execute the command. *)
         let data = Format.sprintf "%s\n" s in
-        Node.Stream.Writable.write
-          (Node.ChildProcess.get_stdin process) data ?callback:cb ()
+        Lwt_io.write process#stdin data
     | None ->
-       ()
+        Lwt.return_unit
   ) fmt
 
 let targetCobExecutable target cwd =
@@ -213,24 +212,21 @@ let sendCommand mi2 command ?(on_failure=Reject) () : MiNode.result Lwt.t =
           else
             Lwt.wakeup_later resolver rnode
         ) mi2.handlers;
-      stdin mi2 "%d-%s" mi2.tok command;
+      let%lwt () = stdin mi2 "%d-%s" mi2.tok command in
       promise
   | None ->
       Lwt.wakeup_later_exn resolver (error "Child process not started");
       promise
 
-let sendUserInput mi2 command ?(threadId=0) ?(frameLevel=0) () : Promise.error option Lwt.t =
+let sendUserInput mi2 command ?(threadId=0) ?(frameLevel=0) () : unit Lwt.t =
   ignore threadId; ignore frameLevel;
-  let promise, resolver = Lwt.wait () in
   match mi2.process with
   | Some _ ->
       mi2.tok <- mi2.tok + 1;
       mi2.handlers <- IntMap.add mi2.tok ignore mi2.handlers;
-      stdin mi2 ~cb:resolver "%d%s" mi2.tok command;
-      promise
+      stdin mi2 "%d%s" mi2.tok command
   | None ->
-      Lwt.wakeup_later_exn resolver @@ error "Child process not started";
-      promise
+      Lwt.fail @@ error "Child process not started"
 
 let initCommands mi2 target ?targetArgs cwd =
   let cwd' = "\"" ^ (Util.escape cwd) ^ "\"" in
@@ -284,7 +280,6 @@ let initCommands mi2 target ?targetArgs cwd =
 let (//) = Filename.concat
 
 let getStack mi2 threadId maxFrameLevels : Stack.t list Lwt.t =
-  let open Lwt.Syntax in
   Log.debug ["getStack"];
   let command = "stack-list-frames" in
   let command =
@@ -299,7 +294,7 @@ let getStack mi2 threadId maxFrameLevels : Stack.t list Lwt.t =
     else
       command
   in
-  let* (rnode : MiNode.result) = sendCommand mi2 command () in
+  let%lwt (rnode : MiNode.result) = sendCommand mi2 command () in
   let stack = MiNode.rfield rnode "stack" in
   let stack =
     MiNode.Value.kvFilterMap (fun key frame ->
@@ -339,9 +334,7 @@ let getStack mi2 threadId maxFrameLevels : Stack.t list Lwt.t =
 
 (* NOTE: never rejected *)
 let getStack mi2 threadId maxFrameLevels : Stack.t list Lwt.t =
-  Lwt.catch
-    (fun () -> getStack mi2 threadId maxFrameLevels)
-    (fun _exn -> Lwt.return [])
+  try%lwt getStack mi2 threadId maxFrameLevels with _exn -> Lwt.return []
 
 let rec create () =
   {
@@ -396,54 +389,63 @@ and attach mi2 cwd target group : unit Lwt.t =
 
 and loadOrAttach mi2 cwd target ?targetArgs group =
   if not (Sys.file_exists cwd) then Lwt.fail @@ error "cwd does not exist"
-  else
+  else (
     begin
-      begin
-        try mi2.map <- SourceMap.create cwd (target :: group) mi2.sourceDirs
-        with e -> Log.error [Printexc.to_string e]
-      end;
-      Log.debug ["Source map created"];
-      Log.info [SourceMap.toString mi2.map];
-      let open Lwt.Syntax in
-      let* () =
-        match targetArgs with
-        | Some _targetArgs ->
-            setupTerminal mi2 target
-        | None ->
-            Lwt.return_unit
+      try mi2.map <- SourceMap.create cwd (target :: group) mi2.sourceDirs
+      with e -> Log.error [Printexc.to_string e]
+    end;
+    Log.debug ["Source map created"];
+    Log.info [SourceMap.toString mi2.map];
+    let%lwt () =
+      match targetArgs with
+      | Some _targetArgs ->
+          setupTerminal mi2 target
+      | None ->
+          Lwt.return_unit
+    in
+    let args = [|"gdb"; "--interpreter=mi2"; "--quiet"|] in
+    let env =
+      Dict.to_seq mi2.procEnv
+      |> Seq.map (fun (k, v) -> Format.sprintf "%s=%s" k v)
+      |> Array.of_seq
+    in
+    let process = Lwt_process.open_process_full ~cwd ~env (mi2.gdbPath, args) in
+    Lwt.async (fun () ->
+      let rec loop () : unit Lwt.t =
+        match%lwt Lwt_io.read_line process#stdout with
+        | exception End_of_file -> Lwt.return_unit
+        | line -> (
+            stdout mi2 line;
+            loop ())
       in
-      let process =
-        Node.ChildProcess.(spawn_process mi2.gdbPath
-            [|"gdb"; "--interpreter=mi2"; "--quiet"|]
-            ~options:(Options.create ~cwd ~env:mi2.procEnv ()) ())
+      loop ());
+    Lwt.async (fun () ->
+      let rec loop () : unit Lwt.t =
+        match%lwt Lwt_io.read_line process#stderr with
+        | exception End_of_file -> Lwt.return_unit
+        | line -> (
+            stderr mi2 line;
+            loop ())
       in
-      Node.Stream.Readable.on
-        (Node.ChildProcess.get_stdout process) (`Data (stdout mi2));
-      Node.Stream.Readable.on
-        (Node.ChildProcess.get_stderr process) (`Data (stderr mi2));
-      Node.ChildProcess.on process
-        (`Exit (fun ~code:_ ?signal:_ () ->
-             Option.iter (fun ttyPid ->
-                 Node.Process.kill ttyPid ()) mi2.ttyPid;
-             Event.(emit mi2 Quit ())));
-      (Promise.make @@ fun ~resolve ~reject ->
-       Node.ChildProcess.on process (`Error (fun ~err -> reject err));
-       Node.ChildProcess.on process (`Spawn resolve)) |>
-      Promise.then_ ~fulfilled:(fun () ->
-          mi2.process <- Some (process);
-          initCommands mi2 target ?targetArgs cwd |> List.rev |>
-          Promise.all_list |> Promise.then_ ~fulfilled:(fun _ ->
-              Promise.resolve ()
-            )
-        )
-    end
+      loop ());
+    (* REVIEW: il faut peut-être capturer les exceptions dans ce async? *)
+    Lwt.async (fun () ->
+      match%lwt process#status with
+      | WEXITED _ | WSIGNALED _ | WSTOPPED _ ->
+        (* REVIEW: there is no Lwt_unix.kill? *)
+        Option.iter (fun pid -> Unix.kill pid Sys.sigterm) mi2.ttyPid;
+        (* TODO *)
+        (* Event.emit mi2 Quit () *)
+        Lwt.return_unit);
+    (* REVIEW: on doit peut-être attendre que le processus soit prêt comme
+       dans le code précédent? *)
+    mi2.process <- Some process;
+    let%lwt _ =
+      initCommands mi2 target ?targetArgs cwd |> List.rev |> Lwt.all
+    in
+    Lwt.return_unit)
 
-and stdout mi2 ~chunk =
-  let data =
-    match chunk with
-    | `String s -> s
-    | `Buffer b -> Node.Buffer.toString b
-  in
+and stdout mi2 data =
   Log.debug ["stdout: "; data];
   SmartBuffer.append mi2.buffer data;
   SmartBuffer.foreach_line mi2.buffer (fun b off len ->
@@ -454,12 +456,7 @@ and stdout mi2 ~chunk =
         () (* NOTE: (gdb) marker arrives here *))
     )
 
-and stderr mi2 ~chunk =
-  let data =
-    match chunk with
-    | `String s -> s
-    | `Buffer b -> Node.Buffer.toString b
-  in
+and stderr mi2 data =
   Log.debug ["stderr: "; data];
   SmartBuffer.append mi2.errbuf data;
   SmartBuffer.foreach_line mi2.errbuf (fun b off len ->
@@ -615,10 +612,9 @@ and onSolibEvent mi2 anode =
     end
 
 and start mi2 ?attachTarget () : bool Lwt.t =
-  let open Lwt.Syntax in
   Log.debug ["start"];
   let send cmd expected =
-    let* (rnode : MiNode.result) = sendCommand mi2 cmd () in
+    let%lwt (rnode : MiNode.result) = sendCommand mi2 cmd () in
     (* NOTE: this clears the terminal upon start, to hide a GDB warning *)
     Option.iter (fun ttyName ->
         Node.Fs.writeFileSync
@@ -628,7 +624,7 @@ and start mi2 ?attachTarget () : bool Lwt.t =
   in
   if mi2.noDebug then send "exec-run" Running
   else
-    let* _args = Event.oncep mi2 Event.DebugReady in
+    let%lwt _args = Event.oncep mi2 Event.DebugReady in
     match attachTarget with
     | None | Some "" ->
         send "exec-run" Running
@@ -649,18 +645,15 @@ and stopOrDetach mi2 cmd expected =
   (* NOTE: pid might be null when calling this function
      (if called when launching gdb failed) *)
   match mi2.process with
-  | Some (process) ->
-      let to_ = Node.setTimeout (fun () ->
-          Node.Process.kill (- (Node.ChildProcess.get_pid process)) ()
-        ) 1000
-      in
-      Node.ChildProcess.on process
-        (`Exit (fun ~code:_ ?signal:_ () -> Node.clearTimeout to_));
-      sendCommand mi2 cmd ~on_failure:Resolve () |> resultIs expected
+  | Some process ->
+      (* REVIEW: the previous code killed the process group itself. *)
+      process#terminate;
+      sendCommand mi2 cmd ~on_failure:Resolve ()
+      |> resultIs expected
   | None ->
       Lwt.return false
 
-and interrupt mi2 : bool Promise.t =
+and interrupt mi2 : bool Lwt.t =
   Log.debug ["interrupt"];
   sendCommand mi2 "exec-interrupt" () |>
   resultIs MiNode.Done
@@ -686,31 +679,29 @@ and stepOver mi2 : bool Lwt.t =
   sendCommand mi2 cmd () |> resultIs Running
 
 and stepInto mi2 : bool Lwt.t =
-  let open Lwt.Syntax in
   Log.debug ["stepInto"];
   mi2.lastStepCommand <- stepInto;
   if mi2.subroutine < 0 then
     sendCommand mi2 "exec-step" () |> resultIs Running
   else
-    let* (_rnode : MiNode.result) =
+    let%lwt (_rnode : MiNode.result) =
       sendCommand mi2 ("break-insert -t " ^
                         (string_of_int mi2.subroutine)) ()
     in
     sendCommand mi2 "exec-step" ()
     |> resultIs Running
 
-and stepOut mi2 : bool Promise.t =
+and stepOut mi2 : bool Lwt.t =
   Log.debug ["stepOut"];
   mi2.lastStepCommand <- stepOut;
   sendCommand mi2 "exec-finish" ()
   |> resultIs Running
 
-and goto mi2 filename line : bool Promise.t =
-  let open Lwt.Syntax in
+and goto mi2 filename line : bool Lwt.t =
   Log.debug ["goto"];
   let filename = if filename = "" then "" else (Util.escape filename) ^ ":" in
   let target = "\"" ^ filename ^ (string_of_int line) ^ "\"" in
-  let* (_rnode : MiNode.result) =
+  let%lwt (_rnode : MiNode.result) =
     sendCommand mi2 ("break-insert -t " ^ target) ()
   in
   sendCommand mi2 "exec-step" ()
@@ -729,10 +720,10 @@ and reloadBreakpoints mi2 =
 
 (* TODO: add in map according to input data file/line/fun *)
 and addBreakpoint mi2 (breakpoint : Breakpoint.t)
-  : Breakpoint.t option Promise.t =
+  : Breakpoint.t option Lwt.t =
   Log.debug ["addBreakpoint"];
   if Breakpoint.Map.mem breakpoint mi2.breakpoints then
-    Promise.resolve None
+    Lwt.return None
   else
     let loc_opt =
       match breakpoint.location with
@@ -754,7 +745,7 @@ and addBreakpoint mi2 (breakpoint : Breakpoint.t)
     in
     match loc_opt with
     | None ->
-        Promise.resolve None
+        Lwt.return None
     | Some (loc) ->
         let count =
           match breakpoint.countCondition with
@@ -773,36 +764,35 @@ and addBreakpoint mi2 (breakpoint : Breakpoint.t)
           | None | Some ("") -> ""
           | Some (cond) -> "-c " ^ cond
         in
-        sendCommand mi2
-          ("break-insert -f " ^ loc ^ " " ^ count ^ " " ^ cond) () |>
-        Promise.then_ ~fulfilled:(fun (rnode : MiNode.result) ->
-            let bkpt = MiNode.rfield rnode "bkpt" in
-            let number = MiNode.Value.(field "number" bkpt |> int) in
-            (* NOTE: the following does not seem to be necessary *)
-            (*
-            let location =
-              MiNode.Value.(field "original-location" bkpt |> string) in
-            let file, line =
-              match String.split_on_char '\'' location with
-              | file :: line :: [] ->
-                  file, (try int_of_string line with _ -> -1)
-              | _ ->
-                  "", -1
-            in
-            let breakpoint = Breakpoint.{
-              location = FileLine { file; line };
-              condition = None;
-              countCondition = None;
-            } in
-            *)
-            mi2.breakpoints <-
-              Breakpoint.Map.add breakpoint number mi2.breakpoints;
-            Promise.resolve (Some (breakpoint))
-          )
+        let%lwt (rnode : MiNode.result) =
+          sendCommand mi2
+            ("break-insert -f " ^ loc ^ " " ^ count ^ " " ^ cond) ()
+        in
+        let bkpt = MiNode.rfield rnode "bkpt" in
+        let number = MiNode.Value.(field "number" bkpt |> int) in
+        (* NOTE: the following does not seem to be necessary *)
+        (*
+        let location =
+          MiNode.Value.(field "original-location" bkpt |> string) in
+        let file, line =
+          match String.split_on_char '\'' location with
+          | file :: line :: [] ->
+              file, (try int_of_string line with _ -> -1)
+          | _ ->
+              "", -1
+        in
+        let breakpoint = Breakpoint.{
+          location = FileLine { file; line };
+          condition = None;
+          countCondition = None;
+        } in
+        *)
+        mi2.breakpoints <-
+          Breakpoint.Map.add breakpoint number mi2.breakpoints;
+        Lwt.return (Some (breakpoint))
 
 (* NOTE: never rejected *)
-and clearBreakpoints mi2 file : bool Promise.t =
-  let open Lwt.Syntax in
+and clearBreakpoints mi2 file : bool Lwt.t =
   Log.debug ["clearBreakpoints"];
   let isBreakpointForFile file (bp : Breakpoint.t) =
     match bp.location with
@@ -824,15 +814,14 @@ and clearBreakpoints mi2 file : bool Promise.t =
     mi2.ignoredBreakpoints <-
     Breakpoint.Set.filter (fun bp ->
       not (isBreakpointForFile file bp)) mi2.ignoredBreakpoints;
-    Promise.resolve true
+    Lwt.return true
 
 and getThreads mi2 : Thread.t list Lwt.t =
-  let open Lwt.Syntax in
   Log.debug ["getThreads"];
   if mi2.noDebug then
     Lwt.return []
   else
-    let* (rnode : MiNode.result) = sendCommand mi2 "thread-info" () in
+    let%lwt (rnode : MiNode.result) = sendCommand mi2 "thread-info" () in
     let threads = MiNode.rfield rnode "threads" in
     let threads =
       MiNode.Value.map (fun thread ->
@@ -849,94 +838,90 @@ and getThreads mi2 : Thread.t list Lwt.t =
 (* Retrive the list of global "storage" symbols (ie those stating with b_);
    results are grouped by file *)
 (* NOTE: never rejected *)
-and getGlobalStorageSymbols mi2 : FileSymbols.t list Promise.t =
+and getGlobalStorageSymbols mi2 : FileSymbols.t list Lwt.t =
   Log.debug ["getGlobalStorageSymbols"];
-  sendCommand mi2 ("symbol-info-variables --name \"^b_[0-9]*$\"") () |>
-  Promise.then_ ~fulfilled:(fun (rnode : MiNode.result) ->
-      let debug = MiNode.(rfield rnode "symbols" |> Value.field "debug") in
-      let symbols = MiNode.Value.map (fun file_symbols ->
-          let filename, fullname, symbols = MiNode.Value.(
-              field "filename" file_symbols |> string,
-              field "fullname" file_symbols |> string,
-              field "symbols" file_symbols |> map (fun symbol ->
-                  let line, name, type_, description =
-                    field "line" symbol |> int,
-                    field "name" symbol |> string,
-                    field "type" symbol |> string,
-                    field "description" symbol |> string
-                  in
-                  Symbol.{ line; name; type_; description }
-                )
-            )
-          in
-          FileSymbols.{ filename; fullname; symbols }
-        ) debug
-      in
-      Promise.resolve symbols
-    ) ~rejected:(fun _err ->
-      Promise.resolve []
-    )
+  try%lwt
+    let%lwt (rnode : MiNode.result) =
+      sendCommand mi2 ("symbol-info-variables --name \"^b_[0-9]*$\"") ()
+    in
+    let debug = MiNode.(rfield rnode "symbols" |> Value.field "debug") in
+    let symbols = MiNode.Value.map (fun file_symbols ->
+        let filename, fullname, symbols = MiNode.Value.(
+            field "filename" file_symbols |> string,
+            field "fullname" file_symbols |> string,
+            field "symbols" file_symbols |> map (fun symbol ->
+                let line, name, type_, description =
+                  field "line" symbol |> int,
+                  field "name" symbol |> string,
+                  field "type" symbol |> string,
+                  field "description" symbol |> string
+                in
+                Symbol.{ line; name; type_; description }
+              )
+          )
+        in
+        FileSymbols.{ filename; fullname; symbols }
+      ) debug
+    in
+    Lwt.return symbols
+  with _exn -> Lwt.return []
 
 (* Retrieve the list of local "storage" variables (ie those strating with b_) *)
 (* NOTE: never rejected *)
 and getLocalStorageVariables mi2 threadId frameLevel
-  : DebuggerVariable.t list Promise.t =
-  let open Lwt.Syntax in
+  : DebuggerVariable.t list Lwt.t =
   Log.debug ["getLocalStorageVariables"];
-  let* funName_opt = getCurrentFunctionName mi2 in
+  let%lwt funName_opt = getCurrentFunctionName mi2 in
   match funName_opt with
   | None -> Lwt.return []
   | Some funName ->
-      Lwt.catch
-        (fun () ->
-          let* (rnode : MiNode.result) =
-            sendCommand mi2 ("stack-list-variables --thread " ^
-                              (string_of_int threadId) ^ " --frame " ^
-                              (string_of_int frameLevel) ^ " --all-values") ()
-          in
-          MiNode.(rfield rnode "variables")
-          |> MiNode.Value.fold (fun vars v ->
-              let cName, value =
-                MiNode.Value.(field "name" v |> string,
-                              field "value" v |> string)
-              in
-              if String.starts_with ~prefix:"b_" cName then
-                SourceMap.findLocalByC mi2.map funName cName |>
-                Option.fold ~none:vars ~some:(fun dv ->
-                      DebuggerVariable.setValue dv value;
-                      dv :: vars)
-              else
-                vars
-            ) []
-          |> List.rev
-          |> Lwt.return)
-        (fun _exn -> Lwt.return [])
+      try%lwt
+        let%lwt (rnode : MiNode.result) =
+          sendCommand mi2 ("stack-list-variables --thread " ^
+                            (string_of_int threadId) ^ " --frame " ^
+                            (string_of_int frameLevel) ^ " --all-values") ()
+        in
+        MiNode.(rfield rnode "variables")
+        |> MiNode.Value.fold (fun vars v ->
+            let cName, value =
+              MiNode.Value.(field "name" v |> string,
+                            field "value" v |> string)
+            in
+            if String.starts_with ~prefix:"b_" cName then
+              SourceMap.findLocalByC mi2.map funName cName |>
+              Option.fold ~none:vars ~some:(fun dv ->
+                    DebuggerVariable.setValue dv value;
+                    dv :: vars)
+            else
+              vars
+          ) []
+        |> List.rev
+        |> Lwt.return
+      with _exn -> Lwt.return []
 
 (* Find a (local) variable by its C name and get its value *)
 (* NOTE: threadId and frameLevel are actually never passed to this function *)
 and evalLocalCVariable mi2 cName ?(threadId=0) ?(frameLevel=0) ()
-  : DebuggerVariable.t option Promise.t =
-  let open Lwt.Syntax in
+  : DebuggerVariable.t option Lwt.t =
   Log.debug ["evalCLocalVariable "; cName];
-  let* funName_opt = getCurrentFunctionName mi2 in
+  let%lwt funName_opt = getCurrentFunctionName mi2 in
   match funName_opt with
   | None -> Lwt.return None
   | Some funName -> (
       let dv_opt = SourceMap.findLocalByC mi2.map funName cName in
       match dv_opt with
       | Some dv ->
-          let* () = evalVariable mi2 dv ~threadId ~frameLevel () in
+          let%lwt () = evalVariable mi2 dv ~threadId ~frameLevel () in
           Lwt.return (Some dv)
       | None -> Lwt.return None)
 
 (* Find a global variable by its C name and get its value *)
 and evalGlobalCVariable mi2 cName : DebuggerVariable.t option Lwt.t =
-  let open Lwt.Syntax in
   Log.debug ["evalCGlobalVariable "; cName];
   let dv_opt = SourceMap.findGlobalByC mi2.map cName in
   match dv_opt with
   | Some (dv) ->
-      let* () = evalVariable mi2 dv () in
+      let%lwt () = evalVariable mi2 dv () in
       Lwt.return (Some dv)
   | None ->
       Lwt.return None
@@ -944,13 +929,12 @@ and evalGlobalCVariable mi2 cName : DebuggerVariable.t option Lwt.t =
 (* Find a global symbol by its C name and get its value *)
 and evalGlobalSymbol mi2 (s : LocalizedSymbol.t)
   : DebuggerVariable.t Lwt.t =
-  let open Lwt.Syntax in
   Log.debug ["evalGlobalSymbol"];
   let dv_opt =
     SourceMap.findGlobalByC mi2.map ~cFile:s.filename s.symbol.name in
   match dv_opt with
   | Some v ->
-      let* () = evalVariable mi2 v () in
+      let%lwt () = evalVariable mi2 v () in
       Lwt.return v
   | None ->
       Lwt.fail @@ error "Unknown symbol: %s" s.symbol.name
@@ -974,43 +958,39 @@ and evalVariable mi2 (dv : DebuggerVariable.t) ?(threadId=0) ?(frameLevel=0) () 
     else
       cName
   in
-  sendCommand mi2 (command ^ arguments ^ expression) () |>
-  Promise.then_ ~rejected:(fun err ->
-      let msg = Node.JsError.message err in
-      (* NOTE: cob_get_field_str added (06/2020) in GC 3.1 (12/2020) *)
-      let re = Str.regexp_string "No symbol \"cob_get_field_str_buffered\"" in
-      if Util.matches re msg then
-        begin
-          mi2.hasCobGetFieldStr <- false;
-          evalVariable mi2 dv ~threadId ~frameLevel ()
-        end
+  try%lwt
+    let%lwt (rnode : MiNode.result) =
+      sendCommand mi2 (command ^ arguments ^ expression) ()
+    in
+    let value = MiNode.(rfield rnode "value" |> Value.string) in
+    begin
+      if mi2.hasCobGetFieldStr && dv.isField then
+        DebuggerVariable.setValuePreformatted dv value
       else
-        begin
-          log mi2 "stderr" (msg);
-          Promise.reject err
-        end
-    ) ~fulfilled:(fun rnode ->
-      let value = MiNode.(rfield rnode "value" |> Value.string) in
-      begin
-        if mi2.hasCobGetFieldStr && dv.isField then
-          DebuggerVariable.setValuePreformatted dv value
-        else
-          DebuggerVariable.setValue dv value
-      end;
-      Promise.resolve ()
-    )
+        DebuggerVariable.setValue dv value
+    end;
+    Lwt.return_unit
+  with exn -> (* review this code *)
+    let msg = Printexc.to_string exn in
+    (* NOTE: cob_get_field_str added (06/2020) in GC 3.1 (12/2020) *)
+    let re = Str.regexp_string "No symbol \"cob_get_field_str_buffered\"" in
+    if Util.matches re msg then (
+      mi2.hasCobGetFieldStr <- false;
+      evalVariable mi2 dv ~threadId ~frameLevel ())
+    else (
+      log mi2 "stderr" msg;
+      Lwt.fail exn)
 
-and setLocalCobolVariable mi2 cobName rawValue : string list Promise.t =
+and setLocalCobolVariable mi2 cobName rawValue : string list Lwt.t =
   Log.debug ["setLocalCobolVariable"];
   setLocalVariable SourceMap.findLocalByCobol mi2 cobName rawValue
 
-and setLocalCVariable mi2 cName rawValue : string list Promise.t =
+and setLocalCVariable mi2 cName rawValue : string list Lwt.t =
   Log.debug ["setLocalCVariable"];
   setLocalVariable SourceMap.findLocalByC mi2 cName rawValue
 
 and setLocalVariable findFunc mi2 name rawValue =
-  let open Lwt.Syntax in
-  let* funName_opt = getCurrentFunctionName mi2 in
+  let%lwt funName_opt = getCurrentFunctionName mi2 in
   let dv_opt =
     Option.bind funName_opt (fun funName ->
         findFunc mi2.map funName name)
@@ -1030,7 +1010,7 @@ and lookupGlobalCobolWithCName mi2 cobName cName : DebuggerVariable.t option =
   in
   SourceMap.findGlobalByCobol mi2.map ?cFile cobName
 
-and setGlobalCVariable mi2 cName rawValue : string list Promise.t =
+and setGlobalCVariable mi2 cName rawValue : string list Lwt.t =
   Log.debug ["setGlobalCVariable"];
   let dv_opt = SourceMap.findGlobalByC mi2.map cName in
   match dv_opt with
@@ -1041,51 +1021,48 @@ and setGlobalCVariable mi2 cName rawValue : string list Promise.t =
       Lwt.fail @@ error "Global variable not found: %s" cName
 
 and setDebuggerVariable mi2 (dv : DebuggerVariable.t) rawValue =
-  let open Lwt.Syntax in
   let cleanedRawValue = Util.cleanRawValue rawValue in
-  Lwt.catch
-    (fun () ->
-      let* (_rnode : MiNode.result) =
-        let cName = Util.escape dv.cName in
-        if dv.attribute.type_ = INTEGER then
-          sendCommand mi2 ("gdb-set var " ^
-                           cName ^ "=" ^ cleanedRawValue) ()
-        else if mi2.hasCobPutFieldStr && dv.isField then
-          sendCommand mi2
-            ("data-evaluate-expression \"(int)cob_put_field_str(&" ^
-             cName ^ ", \\\"" ^ cleanedRawValue ^ "\\\")\"") ()
-        else
-          let finalValue = DebuggerVariable.formatValue dv cleanedRawValue in
-          let cName =
-            if dv.isField then cName ^ ".data"
-            else cName
-          in
-          sendCommand mi2
-            ("data-evaluate-expression \"(void)strncpy(" ^ cName ^ ", \\\"" ^
-             finalValue ^ "\\\", " ^ (string_of_int dv.size) ^ ")\"") ()
-      in
-      if dv.parent <> None || DebuggerVariable.hasChildren dv then
-        Lwt.return ["variables"]
+  try%lwt
+    let%lwt (_rnode : MiNode.result) =
+      let cName = Util.escape dv.cName in
+      if dv.attribute.type_ = INTEGER then
+        sendCommand mi2 ("gdb-set var " ^
+                         cName ^ "=" ^ cleanedRawValue) ()
+      else if mi2.hasCobPutFieldStr && dv.isField then
+        sendCommand mi2
+          ("data-evaluate-expression \"(int)cob_put_field_str(&" ^
+           cName ^ ", \\\"" ^ cleanedRawValue ^ "\\\")\"") ()
       else
-        Lwt.return [])
-    (fun exn ->
-      let msg = Node.JsError.message exn in
-      (* NOTE: cob_put_field_str added (06/2020) in GC 3.1 (12/2020) *)
-      let re = Str.regexp_string "No symbol \"cob_put_field_str\"" in
-      if Util.matches re msg then (
-        mi2.hasCobPutFieldStr <- false;
-        setDebuggerVariable mi2 dv rawValue
-      ) else (
-        log mi2 "stderr" ("Failed to set cob field value on " ^ dv.cName);
-        log mi2 "stderr" msg;
-        Lwt.fail exn))
+        let finalValue = DebuggerVariable.formatValue dv cleanedRawValue in
+        let cName =
+          if dv.isField then cName ^ ".data"
+          else cName
+        in
+        sendCommand mi2
+          ("data-evaluate-expression \"(void)strncpy(" ^ cName ^ ", \\\"" ^
+           finalValue ^ "\\\", " ^ (string_of_int dv.size) ^ ")\"") ()
+    in
+    if dv.parent <> None || DebuggerVariable.hasChildren dv then
+      Lwt.return ["variables"]
+    else
+      Lwt.return []
+  with exn ->
+    let msg = Node.JsError.message exn in
+    (* NOTE: cob_put_field_str added (06/2020) in GC 3.1 (12/2020) *)
+    let re = Str.regexp_string "No symbol \"cob_put_field_str\"" in
+    if Util.matches re msg then (
+      mi2.hasCobPutFieldStr <- false;
+      setDebuggerVariable mi2 dv rawValue
+    ) else (
+      log mi2 "stderr" ("Failed to set cob field value on " ^ dv.cName);
+      log mi2 "stderr" msg;
+      Lwt.fail exn)
 
 (* NOTE: threadId 0 => global scope *)
 and evalExpression mi2 expression threadId frameLevel
   : string option Lwt.t =
-  let open Lwt.Syntax in
   Log.debug ["evalExpression"];
-  let* funName_opt = getCurrentFunctionName mi2 in
+  let%lwt funName_opt = getCurrentFunctionName mi2 in
   match funName_opt with
   | None -> Lwt.return None
   | Some funName ->
@@ -1100,35 +1077,32 @@ and evalExpression mi2 expression threadId frameLevel
       match dv_opt with
       | None -> Lwt.return None
       | Some dv ->
-          let* () = evalVariable mi2 dv ~threadId ~frameLevel () in
+          let%lwt () = evalVariable mi2 dv ~threadId ~frameLevel () in
           Lwt.return (Some dv.value)
 
 (* NOTE: never rejected *)
 and getCurrentFunctionName mi2 =
-  let open Lwt.Syntax in
   Log.debug ["getCurrentFunctionName"];
-  Lwt.catch
-    (fun () ->
-      let* (rnode : MiNode.result) = sendCommand mi2 ("stack-info-frame") () in
-      let frame = MiNode.(rfield rnode "frame") in
-      let res =
-        MiNode.Value.(field "func" frame |>
-                      opt (fun v -> String.lowercase_ascii (string v))) in
-      (* TODO: might need to directly extract the string (because quotes) *)
-      Lwt.return res)
-    (fun _exn -> Lwt.return None)
+  try%lwt
+    let%lwt (rnode : MiNode.result) = sendCommand mi2 ("stack-info-frame") () in
+    let frame = MiNode.rfield rnode "frame" in
+    let res =
+      MiNode.Value.(field "func" frame |>
+                    opt (fun v -> String.lowercase_ascii (string v)))
+    in
+    (* TODO: might need to directly extract the string (because quotes) *)
+    Lwt.return res
+  with _exn -> Lwt.return None
 
 and log mi2 type_ msg =
   let msg = if String.ends_with ~suffix:"\n" msg then msg else msg ^ "\n" in
   Event.(emit mi2 Message (type_, msg))
 
 and resultIs expected p =
-  let open Lwt.Syntax in
-  let* (rnode : MiNode.result) = p in
+  let%lwt (rnode : MiNode.result) = p in
   Lwt.return (rnode.class_ = expected)
 
-and setupTerminal mi2 target : unit Promise.t =
-  let open Lwt.Syntax in
+and setupTerminal mi2 target : unit Lwt.t =
   match mi2.gdbTty with
   | Bool false | Other _ ->
       Lwt.return ()
@@ -1142,7 +1116,7 @@ and setupTerminal mi2 target : unit Promise.t =
       Vscode.Terminal.sendText t ~text:"trap '' 2;" ();
       Vscode.Terminal.sendText t ~text:("clear; " ^ sleepCmd) ();
       Vscode.Terminal.show t ();
-      let* tty_pid_opt = findTtyRetry mi2 in
+      let%lwt tty_pid_opt = findTtyRetry mi2 in
       match tty_pid_opt with
       | Some (tty, pid) ->
           mi2.ttyName <- Some (tty);
@@ -1183,71 +1157,54 @@ and setupTerminal mi2 target : unit Promise.t =
                "-fa"; "DejaVu Sans Mono"; "-fs"; "14";
                "-e"; sleepCmd ^ ";" |]
       in
-      let process =
-        Node.ChildProcess.(spawn_process cmd args
-          ~options:(Options.create ~detached:true ~stdio:"ignore" ()) ()) in
-      Node.ChildProcess.unref process |> ignore;
-      (Promise.make @@ fun ~resolve ~reject ->
-       Node.ChildProcess.on process (`Error (fun ~err -> reject err));
-       Node.ChildProcess.on process (`Spawn resolve)) |>
-      Promise.then_ ~fulfilled:(fun () -> findTtyRetry mi2) |>
-      Promise.then_ ~fulfilled:(fun tty_pid_opt ->
-          match tty_pid_opt with
-          | Some (tty, pid) ->
-              mi2.ttyName <- Some (tty);
-              mi2.ttyPid <- Some (pid);
-              Promise.return ()
-          | None ->
-              Promise.return ()
-        )
+      (* FIXME: ignore stdio *)
+      let _process = Lwt_process.open_process (cmd, args) in
+      (* FIXME: wait for the spawn? *)
+      match%lwt findTtyRetry mi2 with
+      | Some (tty, pid) ->
+        mi2.ttyName <- Some tty;
+        mi2.ttyPid <- Some pid;
+        Lwt.return_unit
+      | None ->
+        Lwt.return_unit
 
 and rePsLine = Str.regexp_case_fold
     {|\([^ 	]*\)[ 	]+\([0-9]+\)[ 	]+\(.*\)|}
 
-and findTty mi2 : (string * int) option Promise.t =
+and findTty mi2 : (string * int) option Lwt.t =
   let ttyPrefix =
     if Node.Process.platform = "darwin" then "ttys"
     else "pts/"
   in
   let sleepVal = string_of_int mi2.sessionId in
-  Node.ChildProcess.exec "ps -A -o tty,pid,command" |>
-  Promise.then_ ~fulfilled:(fun (return : Node.ChildProcess.return) ->
-      let sleepLine_opt =
-        String.split_on_char '\n' return.stdout |>
-        List.find_opt (fun l ->
-            Util.indexOf l ("sleep " ^ sleepVal) >= 0 &&
-            String.starts_with ~prefix:ttyPrefix l
-          )
-      in
-      Option.bind sleepLine_opt (fun line ->
-          if Util.matches rePsLine line then
-            let tty = Util.group line 1 in
-            let pid = Util.groupInt line 2 in
-            Some (tty, pid)
-          else
-            None
-        ) |>
-      Promise.return
-    )
+  let command = Lwt_process.shell "ps -A -o tty,pid,command" in
+  Lwt_process.with_process command @@ fun process ->
+  let%lwt lines =
+    Lwt_io.read_lines process#stdout |> Lwt_stream.to_list
+  in
+  let sleepLine_opt =
+    List.find_opt (fun l ->
+      Util.indexOf l ("sleep " ^ sleepVal) >= 0 &&
+      String.starts_with ~prefix:ttyPrefix l)
+    lines
+  in
+  Option.bind sleepLine_opt (fun line ->
+    if Util.matches rePsLine line then
+      let tty = Util.group line 1 in
+      let pid = Util.groupInt line 2 in
+      Some (tty, pid)
+    else
+      None)
+  |> Lwt.return
 
 and findTtyRetry mi2 =
-  let rec loop tries : (string * int) option Promise.t =
+  let rec loop tries : (string * int) option Lwt.t =
     if tries <= 0 then
-      Promise.return (None)
+      Lwt.return None
     else
-      (Promise.make @@ fun ~resolve ~reject:_ ->
-       Node.setTimeout (fun () ->
-           findTty mi2 |>
-           Promise.then_ ~fulfilled:(fun res ->
-               resolve res;
-               Promise.return ()
-             ) |> ignore
-         ) 300 |> ignore
-      ) |>
-      Promise.then_ ~fulfilled:(fun res ->
-          match res with
-          | Some (_pty) -> Promise.return res
-          | None -> loop (tries - 1)
-        )
+      match%lwt Lwt_unix.with_timeout 0.3 @@ fun () -> findTty mi2 with
+      | exception Lwt_unix.Timeout -> loop (tries - 1)
+      | None -> loop (tries - 1)
+      | Some _ as r -> Lwt.return r
   in
   loop 15
